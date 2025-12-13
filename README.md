@@ -257,13 +257,13 @@ The system automatically executes the following workflow:
 A: The system is designed for discrete manufacturing industries including automotive, electronics, pharmaceuticals, food & beverage. It can be adapted for process manufacturing with configuration changes.
 
 **Q: Can I use a different database instead of SQLite?**
-A: Currently, the system is optimized for SQLite. You can modify the database layer in `src/database/` for custom implementations.
+A: Currently, the system is optimized for SQLite. You can modify the database layer for custom implementations.
 
 **Q: Can this integrate with our existing MES system?**
 A: The system is designed to work alongside existing MES systems by reading data from standard database formats. Direct API integration depends on your MES vendor and may require custom development.
 
 **Q: How do I connect to our real manufacturing data?**
-A: Replace the synthetic data generator with connections to your actual MES database. Modify the database connection settings in `src/database/mes_database.py` to point to your production data source.
+A: Replace the synthetic data generator with connections to your actual MES database. Modify the database connection settings to point to your production data source.
 
 ### Troubleshooting Questions
 
