@@ -3,32 +3,23 @@ Strands agents for MES  application
 Contains Monitor, Analyzer, Planner, and Verifier agents for manufacturing quality analysis
 """
 
-import json
+import re
 import logging
 import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-import pandas as pd
-from strands import Agent, tool
-from strands.models import BedrockModel
-from botocore.config import Config
+import json
+
 import boto3
+import pandas as pd
 from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+from strands import Agent, tool
+from strands.models.anthropic import AnthropicModel
 
-# Define your retry configuration
-def get_retry_config():
-    max_attempts = int(os.getenv('MES_MAX_RETRY_ATTEMPTS', '10'))
-    retry_mode = os.getenv('MES_RETRY_MODE', 'standard')
-    
-    return Config(
-        retries={
-            "max_attempts": max_attempts,
-            "mode": retry_mode,
-        }
-    )
-
+load_dotenv(Path(__file__).parent / ".env")
 # PDF generation imports
 try:
     from reportlab.lib.pagesizes import letter, A4
@@ -69,7 +60,7 @@ class MESAgentManager:
                 db_path = os.path.join(proj_dir, 'mes.db')
         
         if model_id is None:
-            model_id = os.getenv('MES_MODEL_ID', 'global.anthropic.claude-sonnet-4-20250514-v1:0')
+            model_id = os.getenv("MES_MODEL_ID", "claude-haiku-4-5-20251001")
         
         if region_name is None:
             region_name = os.getenv('AWS_REGION', 'us-west-2')
@@ -79,11 +70,28 @@ class MESAgentManager:
         self.recipient_email = os.getenv('MES_RECIPIENT_EMAIL', 'operations.team@example.com')
         self.base_url = os.getenv('MES_BASE_URL', 'https://df4n.cloudfront.net/proxy/8501')
         
-        # Get retry configuration from environment
-        retry_config = get_retry_config()
-        
+        # Database path
         self.db_path = db_path
-        self.model = BedrockModel(model_id=model_id, region_name=region_name, config=retry_config)
+
+        # Anthropic API key from .env / environment
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY is missing. Add it to your .env file.")
+
+        self.model = AnthropicModel(
+            client_args={
+                "api_key": api_key,
+                "timeout": float(os.getenv("MES_API_TIMEOUT", "180")),
+                "max_retries": int(os.getenv("MES_API_RETRIES", "2")),
+            },
+            model_id=model_id,
+            max_tokens=int(os.getenv("MES_MAX_TOKENS", "8296")),
+            params={
+                "temperature": float(os.getenv("MES_TEMPERATURE", "0.2")),
+            },
+        )
+
         self.region_name = region_name
         
         # Define allowed table names for security
@@ -100,8 +108,8 @@ class MESAgentManager:
         logger.info(f"  Sender Email: {self.sender_email}")
         logger.info(f"  Recipient Email: {self.recipient_email}")
         logger.info(f"  Base URL: {self.base_url}")
-        logger.info(f"  Max Retry Attempts: {retry_config.retries['max_attempts']}")
-        logger.info(f"  Retry Mode: {retry_config.retries['mode']}")
+        logger.info(f"  Max Tokens: {os.getenv('MES_MAX_TOKENS', '8296')}")
+        logger.info(f"  Temperature: {os.getenv('MES_TEMPERATURE', '0.2')}")
         
         # Initialize tools and agents
         self._init_database_tools()
@@ -242,6 +250,15 @@ class MESAgentManager:
         @tool
         def send_email(subject: str, email_body: str, pdf_filename: str = None):
             """Send email for the short term action items with PDF link"""
+            if os.getenv("MES_EMAIL_DRY_RUN", "true").lower() == "true":
+                return {
+                    "success": True,
+                    "message": "Dry run: email not sent",
+                    "subject": subject,
+                    "body": email_body,
+                    "pdf_filename": pdf_filename,
+                }
+
             logger.info(f"Sending email with following detail: subject - {subject}")
             start_time = time.time()
             
@@ -314,9 +331,65 @@ class MESAgentManager:
 
     def _init_monitor_tools(self):
         """Initialize Monitor Agent tools - Captures & contextualizes operational data"""
+        @tool
+        def fetch_defect_records(defect_type: str, days_back: int = 7):
+            """Fetch individual defect occurrences for ONE defect type from the
+            Defects table, with timestamps and full context. Returns one row per
+            occurrence: check date/time, severity, quantity, location, recorded
+            root cause, action taken, plus the product, machine, work center,
+            operator, and shift involved. Use this for defect timelines and
+            correlating defect timing against maintenance or downtime events.
+            Newest first, capped at 200 rows."""
+            # Validate inputs (match the house style of the other tools)
+            days_back = int(days_back)
+            if days_back < 0 or days_back > 3650:
+                raise ValueError("days_back must be between 0 and 3650")
+
+            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+
+            query = """
+            SELECT
+                qc.Date as CheckDate,
+                d.DefectType,
+                d.Severity,
+                d.Quantity as DefectQuantity,
+                d.Location,
+                d.RootCause,
+                d.ActionTaken,
+                p.Name as ProductName,
+                m.Name as MachineName,
+                wc.Name as WorkCenterName,
+                e.Name as OperatorName,
+                s.Name as ShiftName,
+                wo.OrderID
+            FROM
+                Defects d
+            JOIN
+                QualityControl qc ON d.CheckID = qc.CheckID
+            JOIN
+                WorkOrders wo ON qc.OrderID = wo.OrderID
+            JOIN
+                Products p ON wo.ProductID = p.ProductID
+            JOIN
+                Machines m ON wo.MachineID = m.MachineID
+            JOIN
+                WorkCenters wc ON wo.WorkCenterID = wc.WorkCenterID
+            JOIN
+                Employees e ON wo.EmployeeID = e.EmployeeID
+            JOIN
+                Shifts s ON e.ShiftID = s.ShiftID
+            WHERE
+                d.DefectType = ?
+                AND date(qc.Date) >= ?
+            ORDER BY
+                qc.Date DESC
+            LIMIT 200
+            """
+
+            return self._execute_safe_query(query, (defect_type, cutoff_date))
         
         @tool
-        def fetch_oee_metrics(days_back: int = 1):
+        def fetch_oee_metrics(days_back: int = 7):
             """Fetch OEE metrics and identify drops in performance"""
             # Validate input
             days_back = int(days_back)
@@ -356,7 +429,7 @@ class MESAgentManager:
             return self._execute_safe_query(query, (cutoff_date,))
 
         @tool
-        def fetch_downtime_events(days_back: int = 1):
+        def fetch_downtime_events(days_back: int = 7):
             """Fetch downtime events and line stoppages"""
             # Validate input
             days_back = int(days_back)
@@ -387,12 +460,13 @@ class MESAgentManager:
                 WorkCenters wc ON m.WorkCenterID = wc.WorkCenterID
             LEFT JOIN 
                 WorkOrders wo ON m.MachineID = wo.MachineID
+                AND dt.StartTime BETWEEN wo.ActualStartTime AND wo.ActualEndTime
             LEFT JOIN 
                 Products p ON wo.ProductID = p.ProductID
             LEFT JOIN 
-                Shifts s ON wo.ShiftID = s.ShiftID
-            LEFT JOIN 
                 Employees e ON wo.EmployeeID = e.EmployeeID
+            LEFT JOIN 
+                Shifts s ON e.ShiftID = s.ShiftID
             WHERE 
                 date(dt.StartTime) >= ?
             ORDER BY 
@@ -402,7 +476,7 @@ class MESAgentManager:
             return self._execute_safe_query(query, (cutoff_date,))
 
         @tool
-        def fetch_historical_patterns(days_back: int = 30):
+        def fetch_historical_patterns(days_back: int = 7):
             """Fetch historical stoppage patterns and context"""
             # Validate input
             days_back = int(days_back)
@@ -431,8 +505,11 @@ class MESAgentManager:
                 WorkCenters wc ON m.WorkCenterID = wc.WorkCenterID
             LEFT JOIN 
                 WorkOrders wo ON m.MachineID = wo.MachineID
+                AND dt.StartTime BETWEEN wo.ActualStartTime AND wo.ActualEndTime
+            LEFT JOIN
+                Employees e ON wo.EmployeeID = e.EmployeeID
             LEFT JOIN 
-                Shifts s ON wo.ShiftID = s.ShiftID
+                Shifts s ON e.ShiftID = s.ShiftID
             WHERE 
                 date(dt.StartTime) >= ?
             GROUP BY 
@@ -483,7 +560,7 @@ class MESAgentManager:
             JOIN 
                 Employees e ON wo.EmployeeID = e.EmployeeID
             JOIN 
-                Shifts s ON wo.ShiftID = s.ShiftID
+                Shifts s ON e.ShiftID = s.ShiftID
             WHERE 
                 date(wo.ActualStartTime) >= ?
             ORDER BY 
@@ -519,7 +596,7 @@ class MESAgentManager:
             JOIN 
                 Employees e ON wo.EmployeeID = e.EmployeeID
             JOIN 
-                Shifts s ON wo.ShiftID = s.ShiftID
+                Shifts s ON e.ShiftID = s.ShiftID
             JOIN 
                 WorkCenters wc ON wo.WorkCenterID = wc.WorkCenterID
             JOIN 
@@ -539,14 +616,16 @@ class MESAgentManager:
             fetch_downtime_events,
             fetch_historical_patterns,
             fetch_work_orders_context,
-            fetch_operator_logs
+            fetch_operator_logs,
+            fetch_defect_records          
         ]
+        
 
     def _init_analyzer_tools(self):
         """Initialize Analyzer Agent tools - Identifies root causes and performs reasoning"""
         
         @tool
-        def analyze_downtime_correlations(days_back: int = 30):
+        def analyze_downtime_correlations(days_back: int = 7):
             """Analyze correlations between downtime and specific factors"""
             # Validate input
             days_back = int(days_back)
@@ -575,12 +654,13 @@ class MESAgentManager:
                 WorkCenters wc ON m.WorkCenterID = wc.WorkCenterID
             LEFT JOIN 
                 WorkOrders wo ON m.MachineID = wo.MachineID
+                AND dt.StartTime BETWEEN wo.ActualStartTime AND wo.ActualEndTime
             LEFT JOIN 
                 Products p ON wo.ProductID = p.ProductID
             LEFT JOIN 
-                Shifts s ON wo.ShiftID = s.ShiftID
-            LEFT JOIN 
                 Employees e ON wo.EmployeeID = e.EmployeeID
+            LEFT JOIN 
+                Shifts s ON e.ShiftID = s.ShiftID
             WHERE 
                 date(dt.StartTime) >= ?
             GROUP BY 
@@ -592,7 +672,7 @@ class MESAgentManager:
             return self._execute_safe_query(query, (cutoff_date,))
 
         @tool
-        def analyze_batch_changeover_time(days_back: int = 30):
+        def analyze_batch_changeover_time(days_back: int = 7):
             """Analyze batch changeover times vs benchmarks"""
             # Validate input
             days_back = int(days_back)
@@ -627,8 +707,10 @@ class MESAgentManager:
                     Products p1 ON wo1.ProductID = p1.ProductID
                 JOIN 
                     Products p2 ON wo2.ProductID = p2.ProductID
+                LEFT JOIN
+                    Employees e2 ON wo2.EmployeeID = e2.EmployeeID
                 LEFT JOIN 
-                    Shifts s ON wo2.ShiftID = s.ShiftID
+                    Shifts s ON e2.ShiftID = s.ShiftID
                 WHERE 
                     date(wo1.ActualEndTime) >= ?
                     AND date(wo2.ActualStartTime) >= ?
@@ -661,7 +743,7 @@ class MESAgentManager:
             return self._execute_safe_query(query, (cutoff_date, cutoff_date))
 
         @tool
-        def identify_performance_patterns(days_back: int = 30):
+        def identify_performance_patterns(days_back: int = 7):
             """Identify patterns in machine and operator performance"""
             # Validate input
             days_back = int(days_back)
@@ -696,7 +778,7 @@ class MESAgentManager:
             JOIN 
                 Employees e ON wo.EmployeeID = e.EmployeeID
             JOIN 
-                Shifts s ON wo.ShiftID = s.ShiftID
+                Shifts s ON e.ShiftID = s.ShiftID
             LEFT JOIN 
                 OEEMetrics oee ON m.MachineID = oee.MachineID 
                 AND date(oee.Date) = date(wo.ActualStartTime)
@@ -714,7 +796,7 @@ class MESAgentManager:
             return self._execute_safe_query(query, (cutoff_date,))
 
         @tool
-        def analyze_quality_defects(days_back: int = 30):
+        def analyze_quality_defects(days_back: int = 7):
             """Analyze quality defects and their root causes"""
             # Validate input
             days_back = int(days_back)
@@ -756,7 +838,7 @@ class MESAgentManager:
             JOIN 
                 Employees e ON wo.EmployeeID = e.EmployeeID
             JOIN 
-                Shifts s ON wo.ShiftID = s.ShiftID
+                Shifts s ON e.ShiftID = s.ShiftID
             WHERE 
                 date(qc.Date) >= ?
             GROUP BY 
@@ -803,6 +885,79 @@ class MESAgentManager:
             
             return action_plan
 
+        def _md_inline(text):
+            """Escape XML-unsafe chars, then convert inline markdown to ReportLab tags."""
+            text = str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+            text = re.sub(r'(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)', r'<i>\1</i>', text)
+            text = re.sub(r'`(.+?)`', r'<font face="Courier">\1</font>', text)
+            return text
+
+        def _markdown_to_flowables(text, styles):
+            """Convert a block of markdown-ish agent text into ReportLab flowables."""
+            flowables = []
+            bullet_style = ParagraphStyle('MDBullet', parent=styles['Normal'],
+                                          leftIndent=18, bulletIndent=6, spaceAfter=4)
+            lines = str(text).split('\n')
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                i += 1
+                if not line:
+                    continue
+                if re.fullmatch(r'[=\-_*]{3,}', line):
+                    flowables.append(Spacer(1, 8))
+                    continue
+                if line.startswith('|') and line.endswith('|'):
+                    rows = [line]
+                    while i < len(lines) and lines[i].strip().startswith('|'):
+                        rows.append(lines[i].strip())
+                        i += 1
+                    data = []
+                    for r in rows:
+                        cells = [c.strip() for c in r.strip('|').split('|')]
+                        if all(re.fullmatch(r':?-{2,}:?', c) for c in cells):
+                            continue
+                        data.append([Paragraph(_md_inline(c), styles['Normal'])
+                                     for c in cells])
+                    if data:
+                        tbl = Table(data, hAlign='LEFT')
+                        tbl.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
+                            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                            ('FONTSIZE', (0, 0), (-1, -1), 8),
+                        ]))
+                        flowables.append(tbl)
+                        flowables.append(Spacer(1, 10))
+                    continue
+                m = re.match(r'(#{1,4})\s+(.*)', line)
+                if m:
+                    level = min(len(m.group(1)), 3)
+                    flowables.append(Paragraph(_md_inline(m.group(2)),
+                                               styles[f'Heading{level}']))
+                    flowables.append(Spacer(1, 6))
+                    continue
+                m = re.fullmatch(r'\*\*(.+?)\*\*:?', line)
+                if m:
+                    flowables.append(Paragraph(f'<b>{_md_inline(m.group(1))}</b>',
+                                               styles['Heading3']))
+                    flowables.append(Spacer(1, 4))
+                    continue
+                m = re.match(r'[-*\u2022]\s+(.*)', line)
+                if m:
+                    flowables.append(Paragraph(_md_inline(m.group(1)), bullet_style,
+                                               bulletText='\u2022'))
+                    continue
+                m = re.match(r'(\d+)[.)]\s+(.*)', line)
+                if m:
+                    flowables.append(Paragraph(_md_inline(m.group(2)), bullet_style,
+                                               bulletText=f'{m.group(1)}.'))
+                    continue
+                flowables.append(Paragraph(_md_inline(line), styles['Normal']))
+                flowables.append(Spacer(1, 6))
+            return flowables
+
         @tool
         def generate_pdf_report(report_data: dict, filename: str = None):
             """Generate PDF report with analysis findings and action plans"""
@@ -848,16 +1003,7 @@ class MESAgentManager:
                 # Add executive summary if available
                 if 'executive_summary' in report_data:
                     story.append(Paragraph("Executive Summary", styles['Heading1']))
-                    # Clean and format the executive summary text
-                    summary_text = str(report_data['executive_summary']).strip()
-                    if summary_text:
-                        # Split into paragraphs and clean up
-                        paragraphs = summary_text.split('\n')
-                        for para in paragraphs:
-                            para = para.strip()
-                            if para:
-                                story.append(Paragraph(para, styles['Normal']))
-                                story.append(Spacer(1, 12))
+                    story.extend(_markdown_to_flowables(report_data['executive_summary'], styles))
                     story.append(PageBreak())
                 
                 # Add report content
@@ -871,35 +1017,39 @@ class MESAgentManager:
                     story.append(Spacer(1, 12))
                     
                     if isinstance(content, str):
-                        # Clean and format string content
-                        content_text = content.strip()
-                        if content_text:
-                            # Split long text into paragraphs
-                            paragraphs = content_text.split('\n')
-                            for para in paragraphs:
-                                para = para.strip()
-                                if para:
-                                    story.append(Paragraph(para, styles['Normal']))
-                                    story.append(Spacer(1, 8))
-                                    
+                        story.extend(_markdown_to_flowables(content, styles))
+
                     elif isinstance(content, list):
-                        # Handle list content
                         for item in content:
-                            item_text = str(item).strip()
-                            if item_text:
-                                story.append(Paragraph(f"• {item_text}", styles['Normal']))
-                                story.append(Spacer(1, 6))
+                            story.extend(_markdown_to_flowables(f"- {item}", styles))
                                 
                     elif isinstance(content, dict):
                         # Handle dictionary content
                         for key, value in content.items():
                             key_formatted = key.replace('_', ' ').title()
-                            story.append(Paragraph(f"<b>{key_formatted}:</b> {str(value)}", styles['Normal']))
-                            story.append(Spacer(1, 6))
+                            if isinstance(value, list):
+                                story.append(
+                                Paragraph(_md_inline(key_formatted), styles["Heading2"])
+                                )
+
+                                for item in value:
+                                    story.append(
+                                        Paragraph(_md_inline(item), styles["Normal"])
+                                    )
+                                    story.append(Spacer(1, 6))
+
+                            else:
+                                story.append(
+                                Paragraph(
+                                    f"<b>{_md_inline(key_formatted)}:</b> {_md_inline(value)}",
+                                    styles["Normal"]
+                                    )
+                                )
+                                story.append(Spacer(1, 6))
                             
                     else:
                         # Handle other data types
-                        story.append(Paragraph(str(content), styles['Normal']))
+                        story.extend(_markdown_to_flowables(str(content), styles))
                         
                     story.append(Spacer(1, 20))
                 
@@ -974,6 +1124,27 @@ class MESAgentManager:
         ]
 
     def _init_agents(self):
+        OUTPUT_RULES = """
+
+=== OUTPUT FORMAT RULES (mandatory) ===
+- Maximum 600 words total. Be dense, not decorative.
+- Use exactly these sections and nothing else:
+  1. KEY FINDINGS (max 5 bullet points)
+  2. SUPPORTING DATA (max 1 table, max 10 rows)
+  3. GAPS / MISSING DATA (what you could not determine and why)
+  4. HANDOFF NOTES (max 3 bullets for the next agent)
+- No emoji, no ASCII-art charts, no decorative separators.
+- Report only numbers that appear in tool results. Never compute
+  totals, percentages, correlations, confidence percentages, or
+  dollar amounts yourself. If a number was not returned by a tool,
+  write "not available in data" instead.
+- Express certainty only as HIGH / MEDIUM / LOW with a one-line reason.
+
+- Every KEY FINDING must end with its data source in brackets:
+  [source: <tool name>, <row count if known>, <date range>].
+  A finding you cannot attribute to a tool result must not be stated.
+"""
+
         """Initialize the specialized agents"""
         
         # Monitor Agent - Captures & contextualizes data
@@ -1001,7 +1172,10 @@ When analyzing events, always:
 - Correlate events with maintenance schedules
 - Provide comprehensive context for analysis
 
-Focus on capturing complete operational context to enable effective root cause analysis."""
+Focus on capturing complete operational context to enable effective root cause analysis.
+
+DATABASE FACTS: There is no Maintenance, maintenance_log, or CMMS table. Maintenance events are recorded as Reason values (e.g. 'Scheduled Maintenance', 'Cleaning', 'Software Error') inside the Downtimes data, which fetch_downtime_events and fetch_historical_patterns already return. Never query tables not returned by your tools.
+""" + OUTPUT_RULES
         )
         
         # Analyzer Agent - Identifies root causes and performs reasoning
@@ -1028,10 +1202,12 @@ Your reasoning process should:
 2. Look for statistical correlations and patterns
 3. Consider multiple contributing factors
 4. Differentiate between symptoms and root causes
-5. Provide confidence levels for your analysis
+5. Rate certainty as HIGH / MEDIUM / LOW based on evidence strength
 6. Recommend data-driven solutions
 
-Always quantify impact and provide actionable insights for the planning phase."""
+Base every claim on tool-returned data and provide actionable insights for the planning phase. 
+DATABASE FACTS: There is no Maintenance, maintenance_log, quality_defects, or CMMS table. Maintenance events are recorded as Reason values inside the Downtimes data returned by analyze_downtime_correlations. Never query tables not returned by your tools.
+""" + OUTPUT_RULES
         )
         
         # Planner Agent - Suggests actionable plans and creates PDF reports
@@ -1066,7 +1242,7 @@ For PDF reports, include:
 
 When generating PDF reports, always return the filename in your response so it can be passed to the Executor Agent for email notifications.
 
-Always focus on measurable, actionable recommendations that improve manufacturing performance."""
+Always focus on measurable, actionable recommendations that improve manufacturing performance.""" + OUTPUT_RULES
         )
         
         # Verifier Agent - Handles human validation only
@@ -1102,7 +1278,7 @@ Human validation criteria:
 - Unusual or unprecedented patterns
 
 Always maintain audit trails and ensure validation results are properly documented. 
-Note: Email notifications are handled by the Executor Agent."""
+Note: Email notifications are handled by the Executor Agent.""" + OUTPUT_RULES
         )
 
         # Executor Agent - Sends email notification and call MES APIs to execute actions
@@ -1131,36 +1307,62 @@ Email report should include:
 
 When sending email notifications, it is mandatory to pass PDF filename that is provided from the Planner Agent, include it in the send_email_notification call to attach the PDF link in format(https://dfmw0zqekwl4n.cloudfront.net/proxy/8501/pdf=pdf_filename.pdf?pdf=pdf_filename.pdf) to the email.
 
-Always focus on clear and concise email body with actionable recommendations, ownership, timeline and risks if not done on time."""
+Always focus on clear and concise email body with actionable recommendations, ownership, timeline and risks if not done on time.""" + OUTPUT_RULES
         )
 
     def _init_supervisor_agent(self):
         """Initialize the Supervisor Agent that orchestrates the workflow"""
+
+        SUPERVISOR_OUTPUT_RULES = """
+
+=== OUTPUT RULES (mandatory) ===
+- No emoji, no ASCII-art charts, no decorative separators.
+- Report only numbers that appear in tool results or subagent reports.
+  Never compute totals, percentages, correlations, confidence
+  percentages, or dollar amounts yourself. If a number was not
+  returned by a tool, write "not available in data" instead.
+- Never compare values against industry standards, benchmarks,
+  "world-class" figures, or "required" durations unless those values
+  appear in tool results.
+- Express certainty only as HIGH / MEDIUM / LOW with a one-line reason.
+"""
         
         @tool
         def call_monitor_agent(prompt: str):
             """Call the Monitor Agent to capture operational data"""
-            return self.monitor_agent(prompt)
+            return self._call_agent_with_retry("monitor", self.monitor_agent, prompt)
         
         @tool
         def call_analyzer_agent(prompt: str):
             """Call the Analyzer Agent to perform root cause analysis"""
-            return self.analyzer_agent(prompt)
+            result = self.analyzer_agent(prompt)
+            self._save_agent_output("analyzer", prompt, result)
+            self._save_agent_transcript("analyzer", self.analyzer_agent)
+            return result
         
         @tool
         def call_planner_agent(prompt: str):
             """Call the Planner Agent to create action plans"""
-            return self.planner_agent(prompt)
+            result = self.planner_agent(prompt)
+            self._save_agent_output("planner", prompt, result)
+            self._save_agent_transcript("planner", self.planner_agent)
+            return result
         
         @tool
         def call_verifier_agent(prompt: str):
             """Call the Verifier Agent to validate findings"""
-            return self.verifier_agent(prompt)
+            result = self.verifier_agent(prompt)
+            self._save_agent_output("verifier", prompt, result)
+            self._save_agent_transcript("verifier", self.verifier_agent)
+            return result
         
         @tool
         def call_executor_agent(prompt: str):
-            """Call the Executor Agent to execute actions"""
-            return self.executor_agent(prompt)
+            """"Call the Executor Agent to execute plans and send notifications"""
+            result = self.executor_agent(prompt)
+            self._save_agent_output("executor", prompt, result)
+            self._save_agent_transcript("executor", self.executor_agent)
+            return result
         
         self.supervisor_agent = Agent(
             model=self.model,
@@ -1208,14 +1410,59 @@ When calling the Planner Agent, extract the PDF filename from the response and p
 Always return a structured analysis result containing:
 - Defect type and analysis parameters including scope settings
 - Monitoring results with operational context within enabled scope
-- Root cause analysis with confidence levels for enabled areas
+- Root cause analysis with HIGH/MEDIUM/LOW certainty ratings for enabled areas
 - Action plans with timelines and resources for enabled scope
 - Verification results with validation status
 - Execution results with notification status
 - Executive summary with key findings and recommendations
 
-Focus on ensuring each agent receives appropriate context and scope parameters, and that the complete workflow produces actionable, validated insights for manufacturing quality improvement within the specified analysis scope. All email notifications should be handled through the Executor Agent with proper PDF filename passing."""
+Focus on ensuring each agent receives appropriate context and scope parameters, and that the complete workflow produces actionable, validated insights for manufacturing quality improvement within the specified analysis scope. All email notifications should be handled through the Executor Agent with proper PDF filename passing.""" + SUPERVISOR_OUTPUT_RULES
         )
+
+    def _save_agent_transcript(self, agent_name: str, agent_obj):
+        """Dump the agent's full internal conversation: every turn,
+        every tool call with arguments, every raw tool result."""
+        try:
+            run_dir = getattr(self, "current_run_dir", None)
+            if run_dir is None:
+                return
+            messages = getattr(agent_obj, "messages", None)
+            if messages is None:
+                return
+            ts = datetime.now().strftime('%H%M%S')
+            (run_dir / f"{ts}_{agent_name}_transcript.json").write_text(
+                json.dumps(messages, indent=2, default=str), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Transcript capture failed for {agent_name}: {e}")
+
+    def _call_agent_with_retry(self, agent_name: str, agent_obj, prompt: str):
+        """Run an agent turn; on failure (timeout/connection), retry once."""
+        last_error = None
+        for attempt in (1, 2):
+            try:
+                result = agent_obj(prompt)
+                self._save_agent_output(agent_name, prompt, result)
+                self._save_agent_transcript(agent_name, agent_obj)
+                return result
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"{agent_name} agent attempt {attempt} failed: {e}"
+                    + (" - retrying once" if attempt == 1 else " - giving up"))
+        return (f"[{agent_name} agent unavailable after 2 attempts: {last_error}. "
+                f"Proceed with available information and state this gap explicitly.]")
+
+    def _save_agent_output(self, agent_name: str, prompt: str, result):
+        """Write an agent's input and output into the current run folder."""
+        try:
+            run_dir = getattr(self, "current_run_dir", None)
+            if run_dir is None:
+                return
+            ts = datetime.now().strftime('%H%M%S')
+            (run_dir / f"{ts}_{agent_name}_prompt.txt").write_text(str(prompt), encoding="utf-8")
+            (run_dir / f"{ts}_{agent_name}_output.txt").write_text(str(result), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Run capture failed for {agent_name}: {e}")
 
     def run_defect_analysis(self, defect_type: str, days_back: int = 7, include_oee: bool = True, 
                            include_downtime: bool = True, include_changeover: bool = True, 
@@ -1235,7 +1482,25 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
         scope_text = ", ".join(scope_summary) if scope_summary else "Basic Analysis"
         
         start_time = datetime.now()
-        
+
+        # --- run artifact capture ---
+        run_id = f"{start_time.strftime('%Y%m%d_%H%M%S')}_{re.sub(r'[^A-Za-z0-9]+', '', defect_type)}"
+        self.current_run_dir = Path("runs") / run_id
+        self.current_run_dir.mkdir(parents=True, exist_ok=True)
+        (self.current_run_dir / "params.json").write_text(json.dumps({
+            "defect_type": defect_type,
+            "days_back": days_back,
+            "include_oee": include_oee,
+            "include_downtime": include_downtime,
+            "include_changeover": include_changeover,
+            "include_maintenance": include_maintenance,
+            "model_id": os.getenv("MES_MODEL_ID", "unknown"),
+            "started": start_time.isoformat(),
+        }, indent=2), encoding="utf-8")
+        run_log_handler = logging.FileHandler(self.current_run_dir / "run.log", encoding="utf-8")
+        run_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(run_log_handler)
+
         try:
             # Create comprehensive prompt for supervisor agent
             supervisor_prompt = f"""
@@ -1281,7 +1546,7 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
             IMPORTANT: Extract the PDF filename from the Planner Agent response and pass it to the Executor Agent for email notifications.
             
             Compile comprehensive results including all agent outputs and provide executive summary.
-            """
+            """ 
             
             # Call supervisor agent to orchestrate the workflow
             supervisor_response = self.supervisor_agent(supervisor_prompt)
@@ -1344,6 +1609,10 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
                 'error': str(e),
                 'status': 'failed'
             }
+        
+        finally:
+            logging.getLogger().removeHandler(run_log_handler)
+            run_log_handler.close()
 
     def get_monitor_agent(self):
         """Get the monitor agent"""

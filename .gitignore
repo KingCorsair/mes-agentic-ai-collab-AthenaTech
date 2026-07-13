@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+reports/
+runs/
+industrial-data-store-simulation-chatbot/
+mes.db
