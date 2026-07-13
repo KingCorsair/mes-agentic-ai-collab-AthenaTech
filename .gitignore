@@ -5,3 +5,4 @@ reports/
 runs/
 industrial-data-store-simulation-chatbot/
 mes.db
+.env

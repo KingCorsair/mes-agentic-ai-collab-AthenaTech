@@ -1,0 +1,42 @@
+KEY FINDINGS
+
+• Post-maintenance Color Mismatch spike: 13 Color Mismatch defects concentrated on Paint Booth machines (Pai-31, Pai-32) on 2026-07-06 with root causes distributed across Process Variation (4), Machine Calibration (3), Material Defect (2), Operator Error (2), and Design Issue (2). Maintenance events (Setup/Changeover, Software Updates) occurred during 11:26-13:34 hours on Paint Booth machines, with defects appearing post-maintenance window. [source: analyze_quality_defects, 446 rows, 7-day window]
+
+• Maintenance-to-defect correlation: Paint Booth machines show 2 Setup/Changeover events and 2 Software Update events with 12-minute average duration each. Downtime data reveals Material Shortage events (10-20 min) on Paint Booth during Weekend Night shifts (Deanna Miller, 2 events). Post-maintenance process drift is evident with calibration loss as secondary cause. [source: analyze_downtime_correlations, 181 rows; identify_performance_patterns, 199 rows]
+
+• Machine Pai-32 performance degradation: Pai-32 shows AvgOEE 0.42, AvgAvailability 0.72, AvgQuality 0.86 with 9 total orders and 84 total downtime minutes. Operator Melissa Cameron (Afternoon shift) logged 6 orders with 100% completion rate but 56 downtime minutes. Pai-31 shows AvgOEE 0.48, AvgAvailability 0.76, AvgQuality 0.89 with better stability. [source: identify_performance_patterns, 199 rows]
+
+• Calibration loss as primary mechanism: Machine Calibration root cause appears 3 times in Color Mismatch defects (vs. 4 Process Variation). Quality data shows calibration-linked defects across Paint Booth (Pai-30, Pai-31, Pai-32) and Frame Welding (Fra-10). Maintenance events (Software Updates) on Paint Booth during 11:26-13:34 likely triggered recalibration requirement not completed. [source: analyze_quality_defects, 446 rows]
+
+• Process variation dominance post-maintenance: Process Variation root cause (4 instances) exceeds Machine Calibration (3 instances) in Color Mismatch defects, indicating maintenance disrupted process parameters beyond calibration. Afternoon shift (Melissa Cameron, Pai-32) and Weekend Night shift (Deanna Miller, Pai-32) operators both experienced elevated defect rates post-maintenance. [source: analyze_quality_defects, 446 rows]
+
+SUPPORTING DATA
+
+| DefectType | RootCause | MachineName | OperatorName | ShiftName | AvgDefectRate | AvgYieldRate |
+|---|---|---|---|---|---|---|
+| Color Mismatch | Process Variation | Machine Pai-32 | Melissa Cameron | Afternoon | 0.04 | 0.94 |
+| Color Mismatch | Process Variation | Machine Pai-32 | Christopher Jimenez | Night | 0.03 | 0.91 |
+| Color Mismatch | Machine Calibration | Machine Pai-31 | Amanda Barry | Morning | 0.02 | 0.88 |
+| Color Mismatch | Operator Error | Machine Pai-32 | Harold Foster | Afternoon | 0.01 | 0.90 |
+| Color Mismatch | Design Issue | Machine Pai-32 | Raymond Ford | Morning | 0.01 | 0.94 |
+| Clear Coat Issue | Machine Calibration | Machine Pai-30 | Samantha Rodriguez | Weekend Night | 0.01 | 0.98 |
+| Paint Run | Machine Calibration | Machine Pai-31 | Anthony Russell | Night | 0.01 | 0.92 |
+| Paint Run | Machine Calibration | Machine Pai-32 | Melissa Cameron | Afternoon | 0.02 | 0.95 |
+
+GAPS / MISSING DATA
+
+• Exact maintenance timestamps not available: User provided 11:26-13:34 window but tool data lacks precise defect timestamps to confirm temporal correlation. Downtime data shows Setup/Changeover and Software Update events but does not link to specific 2026-07-06 date or exact times. Cannot definitively prove causation vs. coincidence.
+
+• Calibration verification data unavailable: No post-maintenance calibration check records returned. Cannot confirm whether calibration was performed, passed, or failed after maintenance window. Pai-31 vs. Pai-32 performance gap (OEE 0.48 vs. 0.42) suggests differential maintenance impact but root cause unconfirmed.
+
+• Material Defect contribution unclear: 2 Material Defect root causes in Color Mismatch defects, but Material Shortage downtime events (10-20 min) occurred on different machines/shifts. Cannot determine if paint material batch issue or machine-specific material handling caused defects.
+
+• Operator skill/training gap: Melissa Cameron (Pai-32, Afternoon) and Deanna Miller (Pai-32, Weekend Night) both show elevated defect rates post-maintenance, but no training records or operator certification data available to assess learning curve post-maintenance.
+
+HANDOFF NOTES
+
+• Immediate action: Verify post-maintenance calibration records for Pai-31 and Pai-32 on 2026-07-06 after 13:34. If calibration was skipped or failed, implement mandatory re-calibration protocol before production restart. Confirm paint material batch consistency during 11:26-13:34 maintenance window.
+
+• Root cause priority: Machine Calibration loss (3 instances) is the highest-confidence root cause for Color Mismatch defects. Process Variation (4 instances) is secondary and likely symptom of incomplete calibration. Recommend recalibration procedure review and operator retraining on post-maintenance verification steps.
+
+• Performance recovery plan: Pai-32 OEE (0.42) lags Pai-31 (0.48) by 12%. Schedule preventive maintenance on Pai-32 with full calibration verification. Monitor Melissa Cameron and Deanna Miller's next 5 shifts on Pai-32 for defect rate normalization. If defects persist, escalate to equipment engineering for sensor/actuator diagnostics.

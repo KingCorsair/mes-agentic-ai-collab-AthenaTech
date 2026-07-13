@@ -1,0 +1,35 @@
+KEY FINDINGS
+
+1. Color Mismatch defects concentrated on Paint/Finish machines Pai-31 and Pai-32 during afternoon shift with 6 documented instances (Severity 1-3), primarily attributed to Process Variation (3 cases), Operator Error (2 cases), and Material Defect (1 case). [source: analyze_quality_defects, 446 rows, 7-day period]
+
+2. Maintenance correlation with defect spike: Scheduled Maintenance on Fra-10 (11:33-11:39, 6 minutes) and Setup/Changeover (11:32-11:47, 15 minutes) precede Color Mismatch spike by ~2 hours; Material Shortage on Pai-32 (12:33-12:44, 11 minutes) occurs 20-30 minutes before peak defect window (13:00-14:00). [source: analyze_downtime_correlations, 181 rows, 7-day period]
+
+3. Operator involvement: Melissa Cameron (2 Color Mismatch defects on Pai-31/Pai-32, Afternoon shift) shows elevated defect association; Kelsey Kaiser and Jessica Green each have 1 Color Mismatch defect during afternoon shifts on Paint machines. [source: analyze_quality_defects, 446 rows]
+
+4. Process Variation is the dominant root cause (3 of 6 Color Mismatch defects), suggesting systematic calibration drift or paint application parameter instability rather than isolated operator error. [source: analyze_quality_defects, 446 rows]
+
+5. Maintenance-to-defect temporal gap (~2 hours) indicates indirect causation: upstream maintenance on Fra-10 may have disrupted material flow, triggering shortage on Pai-32, which then cascaded into process instability on Pai-31/Pai-32 during afternoon shift. [source: analyze_downtime_correlations, 181 rows]
+
+SUPPORTING DATA
+
+| Defect Type | Machine | Operator | Shift | Root Cause | Severity | Count |
+|---|---|---|---|---|---|---|
+| Color Mismatch | Pai-31 | Melissa Cameron | Afternoon | Material Defect | 3 | 1 |
+| Color Mismatch | Pai-31 | Kelsey Kaiser | Afternoon | Operator Error | 3 | 1 |
+| Color Mismatch | Pai-31 | Jessica Green | Afternoon | Process Variation | 3 | 1 |
+| Color Mismatch | Pai-32 | Harold Foster | Afternoon | Operator Error | 3 | 1 |
+| Color Mismatch | Pai-32 | Melissa Cameron | Afternoon | Process Variation | 3 | 1 |
+| Color Mismatch | Pai-32 | Christopher Jimenez | Night | Process Variation | 3 | 1 |
+
+GAPS / MISSING DATA
+
+- Exact timestamps for Color Mismatch defect occurrences not available; analysis relies on shift-level aggregation (Afternoon = 13:00-21:00 window). Cannot pinpoint whether all 13 defects clustered in 13:00-14:00 window or distributed across afternoon shift.
+- Paint application parameters (spray pressure, viscosity, temperature) not captured in defect data; cannot validate whether maintenance on Fra-10 directly caused calibration drift on Pai-31/Pai-32.
+- Material Shortage event on Pai-32 (12:33-12:44) duration is 11 minutes, but defect spike window is 13:00-14:00; recovery time and material queue status unknown.
+- No data on paint batch lot numbers or supplier changes correlating with 2026-07-06 spike; Material Defect root cause cannot be traced to specific material batch.
+
+HANDOFF NOTES
+
+- Prioritize machine calibration audit on Pai-31 and Pai-32: Process Variation dominates (50% of Color Mismatch cases), indicating systematic drift rather than random operator error. Recommend spray pressure and nozzle alignment verification.
+- Investigate material shortage cascade: Material Shortage on Pai-32 (12:33-12:44) preceded defect spike by 20-30 minutes. Verify whether paint supply interruption caused residual viscosity/temperature instability post-recovery.
+- Operator retraining focus: Melissa Cameron (2 defects) and Kelsey Kaiser (1 defect) require process parameter validation training; however, Process Variation dominance suggests equipment-level root cause is primary.

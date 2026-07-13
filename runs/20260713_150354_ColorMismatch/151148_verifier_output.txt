@@ -1,0 +1,37 @@
+## KEY FINDINGS
+
+- **Critical OEE Threshold Breach**: Machine Pai-32 OEE of 0.42 falls significantly below 0.60 minimum threshold, triggering mandatory validation escalation [source: validate_findings, validation_criteria applied to provided metrics].
+
+- **High-Volume Defect Event**: 13 Color Mismatch defects in single work center on 2026-07-06 exceeds high-severity threshold (>10), classified as unusual pattern requiring human expert review [source: validate_findings, defect_count validation].
+
+- **Multi-Factor Root Cause Complexity**: Five distinct root cause categories identified (Process Variation, Machine Calibration, Material Defect, Operator Error, Design Issue) with no single dominant cause, indicating complex scenario requiring expert analysis [source: validate_findings, root_cause distribution].
+
+- **Maintenance Correlation Confirmed**: Setup/Changeover and Software Updates events during 11:26-13:34 hours correlate with defect window, supporting maintenance-quality linkage hypothesis [source: validate_findings, maintenance_correlation enabled analysis].
+
+- **Quality Metric Anomaly**: Pai-32 Quality score of 0.86 contradicts high defect count (13 units), suggesting potential measurement inconsistency or localized defect concentration requiring clarification [source: validate_findings, metric cross-validation].
+
+## SUPPORTING DATA
+
+| Metric | Pai-32 Value | Threshold | Status |
+|--------|--------------|-----------|--------|
+| OEE | 0.42 | ≥0.60 | CRITICAL |
+| Availability | 0.72 | ≥0.75 | BELOW |
+| Quality | 0.86 | ≥0.90 | BELOW |
+| Defect Count | 13 | ≤10 | EXCEEDED |
+| Confidence Score | 0.85 | ≥0.80 | VALID |
+
+## GAPS / MISSING DATA
+
+- **Historical Baseline Comparison**: No prior Color Mismatch frequency data provided; cannot determine if 13-defect event represents unprecedented spike or recurring pattern.
+- **Root Cause Attribution Methodology**: Distribution across five categories lacks quantitative severity weighting; unclear which causes drove majority of defects.
+- **Material Defect Specifics**: Two Material Defect cases not detailed; supplier batch identification, material lot numbers, and incoming inspection records unavailable.
+- **Operator Error Context**: Two Operator Error cases lack shift assignment, training history, or whether same operator involved in both instances.
+- **Design Issue Scope**: Two Design Issue cases not linked to specific product SKUs or design change dates; impact scope on product portfolio unclear.
+
+## HANDOFF NOTES
+
+- **Validation Status**: PENDING_HUMAN_REVIEW with 0.85 confidence score. Escalation required due to critical OEE breach, high-volume defect event, and complex multi-factor root cause scenario. Manufacturing leadership notification mandatory before action plan execution.
+
+- **Expert Review Priorities**: (1) Reconcile Quality metric (0.86) against defect count (13) to confirm measurement validity; (2) Validate maintenance event timing correlation with defect occurrence window; (3) Assess whether Emergency Machine Calibration Recovery is sufficient or if equipment replacement evaluation needed.
+
+- **Action Plan Gating**: All four action plans (Calibration Recovery, Maintenance Documentation, SPC implementation, Operator Retraining) should be held pending human expert sign-off. Recommend operations team validation of root cause distribution before resource allocation to prevent misdirected corrective actions.

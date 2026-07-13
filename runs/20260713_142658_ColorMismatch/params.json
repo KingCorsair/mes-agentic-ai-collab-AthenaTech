@@ -1,0 +1,10 @@
+{
+  "defect_type": "Color Mismatch",
+  "days_back": 7,
+  "include_oee": false,
+  "include_downtime": false,
+  "include_changeover": false,
+  "include_maintenance": true,
+  "model_id": "claude-haiku-4-5-20251001",
+  "started": "2026-07-13T14:26:58.056762"
+}

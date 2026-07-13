@@ -1,0 +1,92 @@
+2026-07-13 13:37:03,480 - strands.telemetry.metrics - INFO - Creating Strands MetricsClient
+2026-07-13 13:37:04,156 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:47:05,347 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.407097 seconds
+2026-07-13 13:47:07,138 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:47:08,744 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 13:47:08,744 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 13:47:08,745 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 13:47:08,746 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 13:47:08,747 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 13:47:08,756 - strands_agent - INFO - Query executed successfully: 13 rows returned
+2026-07-13 13:47:08,776 - strands_agent - INFO - Query executed successfully: 67 rows returned
+2026-07-13 13:47:08,791 - strands_agent - INFO - Query executed successfully: 184 rows returned
+2026-07-13 13:47:08,802 - strands_agent - INFO - Query executed successfully: 189 rows returned
+2026-07-13 13:47:08,820 - strands_agent - INFO - Query executed successfully: 290 rows returned
+2026-07-13 13:47:11,348 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:47:24,217 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.399741 seconds
+2026-07-13 13:47:25,368 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:47:28,079 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.486278 seconds
+2026-07-13 13:47:29,360 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:47:30,113 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 13:47:30,113 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 13:47:30,114 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 13:47:30,131 - strands_agent - INFO - Query executed successfully: 181 rows returned
+2026-07-13 13:47:30,138 - strands_agent - INFO - Query executed successfully: 446 rows returned
+2026-07-13 13:47:30,145 - strands_agent - INFO - Query executed successfully: 199 rows returned
+2026-07-13 13:47:33,208 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:47:43,838 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.410209 seconds
+2026-07-13 13:47:45,049 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:57:47,811 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.388163 seconds
+2026-07-13 13:57:48,996 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:58:24,573 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 13:58:35,579 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.410309 seconds
+2026-07-13 13:58:36,897 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 14:08:39,789 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.463195 seconds
+2026-07-13 14:08:41,139 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 14:08:44,907 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 14:08:56,896 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.386359 seconds
+2026-07-13 14:08:58,439 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 14:19:02,149 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.412976 seconds
+2026-07-13 14:19:03,697 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 14:19:10,911 - strands_agent - INFO - Email notification sent: URGENT: Color Mismatch Defect - Immediate Action Plan & Expert Review Required
+2026-07-13 14:19:11,438 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 14:19:14,525 - anthropic._base_client - INFO - Retrying request to /v1/messages in 0.424445 seconds
+2026-07-13 14:19:15,611 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-07-13 14:19:44,098 - __main__ - INFO - Loading defect types for last 365 days
+2026-07-13 14:19:44,098 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 14:19:44,106 - strands_agent - INFO - Query executed successfully: 36 rows returned
+2026-07-13 14:19:44,109 - __main__ - INFO - Defect types result: {'success': True, 'rows': [{'DefectType': 'Battery Cell Variance'}, {'DefectType': 'Cable Routing'}, {'DefectType': 'Clear Coat Issue'}, {'DefectType': 'Color Mismatch'}, {'DefectType': 'Connection Issue'}, {'DefectType': 'Control Board Error'}, {'DefectType': 'Cosmetic Damage'}, {'DefectType': 'Documentation Error'}, {'DefectType': 'Fastener Torque'}, {'DefectType': 'Frame Bend'}, {'DefectType': 'Hub Bearing Issue'}, {'DefectType': 'Improper Adjustment'}, {'DefectType': 'Incomplete Assembly'}, {'DefectType': 'Insufficient Coverage'}, {'DefectType': 'Interface Misalignment'}, {'DefectType': 'Misalignment'}, {'DefectType': 'Missing Component'}, {'DefectType': 'Motor Coil Problem'}, {'DefectType': 'Noise'}, {'DefectType': 'Orange Peel Texture'}, {'DefectType': 'Out of True'}, {'DefectType': 'Packaging Damage'}, {'DefectType': 'Paint Run'}, {'DefectType': 'Rim Damage'}, {'DefectType': 'Sensor Malfunction'}, {'DefectType': 'Specification Deviation'}, {'DefectType': 'Spoke Tension'}, {'DefectType': 'Stress Crack'}, {'DefectType': 'Surface Defect'}, {'DefectType': 'Threaded Insert Issue'}, {'DefectType': 'Uneven Coating'}, {'DefectType': 'Uneven Tire Seating'}, {'DefectType': 'Valve Hole Misalignment'}, {'DefectType': 'Vibration'}, {'DefectType': 'Waterproofing Failure'}, {'DefectType': 'Weld Failure'}], 'column_names': ['DefectType'], 'row_count': 36, 'execution_time_ms': 7.98, 'dataframe':                  DefectType
+0     Battery Cell Variance
+1             Cable Routing
+2          Clear Coat Issue
+3            Color Mismatch
+4          Connection Issue
+5       Control Board Error
+6           Cosmetic Damage
+7       Documentation Error
+8           Fastener Torque
+9                Frame Bend
+10        Hub Bearing Issue
+11      Improper Adjustment
+12      Incomplete Assembly
+13    Insufficient Coverage
+14   Interface Misalignment
+15             Misalignment
+16        Missing Component
+17       Motor Coil Problem
+18                    Noise
+19      Orange Peel Texture
+20              Out of True
+21         Packaging Damage
+22                Paint Run
+23               Rim Damage
+24       Sensor Malfunction
+25  Specification Deviation
+26            Spoke Tension
+27             Stress Crack
+28           Surface Defect
+29    Threaded Insert Issue
+30           Uneven Coating
+31      Uneven Tire Seating
+32  Valve Hole Misalignment
+33                Vibration
+34    Waterproofing Failure
+35             Weld Failure}
+2026-07-13 14:19:44,110 - __main__ - INFO - Found 36 defect types: ['Battery Cell Variance', 'Cable Routing', 'Clear Coat Issue', 'Color Mismatch', 'Connection Issue', 'Control Board Error', 'Cosmetic Damage', 'Documentation Error', 'Fastener Torque', 'Frame Bend', 'Hub Bearing Issue', 'Improper Adjustment', 'Incomplete Assembly', 'Insufficient Coverage', 'Interface Misalignment', 'Misalignment', 'Missing Component', 'Motor Coil Problem', 'Noise', 'Orange Peel Texture', 'Out of True', 'Packaging Damage', 'Paint Run', 'Rim Damage', 'Sensor Malfunction', 'Specification Deviation', 'Spoke Tension', 'Stress Crack', 'Surface Defect', 'Threaded Insert Issue', 'Uneven Coating', 'Uneven Tire Seating', 'Valve Hole Misalignment', 'Vibration', 'Waterproofing Failure', 'Weld Failure']
+2026-07-13 14:19:50,534 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 14:19:50,539 - strands_agent - INFO - Query executed successfully: 1 rows returned
+2026-07-13 14:19:52,087 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 14:19:52,092 - strands_agent - INFO - Query executed successfully: 1 rows returned
+2026-07-13 14:19:52,220 - strands_agent - INFO - Executing parameterized SQL query
+2026-07-13 14:19:52,224 - strands_agent - INFO - Query executed successfully: 1 rows returned
+2026-07-13 14:19:53,101 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"

@@ -1,0 +1,34 @@
+KEY FINDINGS
+
+- Color Mismatch defects concentrated in Paint and Finish work center (10 of 13 occurrences) on 2026-07-06, with root causes split between Process Variation (4), Machine Calibration (3), Material Defect (2), Operator Error (2), and Design Issue (2) [source: fetch_defect_records, 13 rows, 2026-07-06]
+
+- Machine Pai-32 (Paint Booth) recorded 5 Color Mismatch defects; Machine Pai-31 recorded 3; Quality Control machines (Qua-71, Qua-70) recorded 3 combined, indicating Paint and Finish operations as primary defect source [source: fetch_defect_records, 13 rows, 2026-07-06]
+
+- Afternoon shift (4 defects) and Morning shift (3 defects) show higher Color Mismatch frequency than Night (3) and Weekend shifts (3), with no clear shift-based pattern but temporal clustering around 12:40–14:01 hours [source: fetch_defect_records, 13 rows, 2026-07-06]
+
+- Maintenance-related downtime events (Setup/Changeover, Software Update, Scheduled Maintenance) occurred on Machine Fra-10 (15-min durations) and Paint Booth machines (12-min durations) during 2026-07-06 11:26–13:34, overlapping with Color Mismatch detection window [source: fetch_downtime_events, 189 rows, 2026-07-06 to 2026-07-07]
+
+- No direct temporal correlation between recorded maintenance events and Color Mismatch defects; defects appear post-maintenance completion, suggesting process drift or calibration loss after changeover/software updates [source: fetch_defect_records + fetch_downtime_events, 13 + 189 rows]
+
+SUPPORTING DATA
+
+| Defect Timestamp | Machine | Work Center | Root Cause | Severity | Operator | Shift | Product |
+|---|---|---|---|---|---|---|---|
+| 2026-07-06 14:01:30 | Machine Pai-32 | Paint and Finish | Process Variation | 3 | Christopher Jimenez | Night | eBike T101 |
+| 2026-07-06 13:57:00 | Machine Pai-31 | Paint and Finish | Machine Calibration | 1 | Amanda Barry | Morning | eBike M300 |
+| 2026-07-06 13:35:09 | Machine Pai-32 | Paint and Finish | Design Issue | 3 | Raymond Ford | Morning | eBike T200 |
+| 2026-07-06 13:33:25 | Machine Pai-31 | Paint and Finish | Material Defect | 3 | Melissa Cameron | Afternoon | eBike T101 |
+| 2026-07-06 13:28:15 | Machine Pai-32 | Paint and Finish | Operator Error | 3 | Harold Foster | Afternoon | eBike M300 |
+
+GAPS / MISSING DATA
+
+- Cannot determine if Color Mismatch defects are causally linked to maintenance events; downtime logs show Setup/Changeover and Software Updates on Frame Fabrication (Machine Fra-10) but Paint Booth machines show separate maintenance windows. Temporal proximity exists but causation not available in data.
+- No paint material batch or color specification data available to correlate with Material Defect root causes (2 occurrences).
+- Operator training/certification records not provided; cannot assess if Operator Error (2 occurrences) correlates with recent training gaps or shift transitions.
+- Historical Color Mismatch baseline (prior 30+ days) not captured; cannot determine if 13 defects in 7 days represents anomaly or normal variation.
+
+HANDOFF NOTES
+
+- Escalate Paint and Finish work center (Machines Pai-31, Pai-32) for immediate calibration audit; 10 of 13 defects occurred here with Process Variation and Machine Calibration as dominant root causes.
+- Investigate material supply chain for eBike T101 and T200 products (5 combined defects); cross-reference with Material Defect root causes and batch traceability.
+- Schedule post-maintenance process validation on Paint Booth machines following Setup/Changeover events; current data suggests defects emerge 1–2 hours after maintenance completion, indicating potential recalibration drift.
