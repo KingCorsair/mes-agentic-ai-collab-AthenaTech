@@ -82,7 +82,7 @@ class MESAgentManager:
         self.model = AnthropicModel(
             client_args={
                 "api_key": api_key,
-                "timeout": float(os.getenv("MES_API_TIMEOUT", "180")),
+                "timeout": float(os.getenv("MES_API_TIMEOUT", "90")),
                 "max_retries": int(os.getenv("MES_API_RETRIES", "2")),
             },
             model_id=model_id,
@@ -1141,8 +1141,15 @@ class MESAgentManager:
 - Express certainty only as HIGH / MEDIUM / LOW with a one-line reason.
 
 - Every KEY FINDING must end with its data source in brackets:
-  [source: <tool name>, <row count if known>, <date range>].
+  [source: <exact tool name>, <row count if known>, <date range>].
+  The source must be the exact name of a tool called in this
+  conversation (e.g. fetch_defect_records). Never cite an analysis,
+  method, section, or report name as a source.
   A finding you cannot attribute to a tool result must not be stated.
+- Each KEY FINDING must be followed by one line starting "WHY: " giving
+  a 1-2 sentence causal mechanism in plain manufacturing terms (how this
+  cause physically produces this defect). If the mechanism is not
+  certain, give the most plausible one and label it "(hypothesis)".
 """
 
         """Initialize the specialized agents"""
@@ -1175,6 +1182,13 @@ When analyzing events, always:
 Focus on capturing complete operational context to enable effective root cause analysis.
 
 DATABASE FACTS: There is no Maintenance, maintenance_log, or CMMS table. Maintenance events are recorded as Reason values (e.g. 'Scheduled Maintenance', 'Cleaning', 'Software Error') inside the Downtimes data, which fetch_downtime_events and fetch_historical_patterns already return. Never query tables not returned by your tools.
+PDF REPORT CONTENT: When calling generate_pdf_report, the report_data
+you pass must carry FULL detail: each finding with its WHY mechanism,
+its evidence and tool sources, the complete rationale for each action,
+and explicit uncertainties. Your word cap applies to your chat reply,
+NOT to the PDF content. Include costs, FTE counts, targets, or
+technical specifications ONLY if they appear in tool results or
+subagent reports; otherwise write "not available in data".
 """ + OUTPUT_RULES
         )
         
@@ -1325,7 +1339,16 @@ Always focus on clear and concise email body with actionable recommendations, ow
   "world-class" figures, or "required" durations unless those values
   appear in tool results.
 - Express certainty only as HIGH / MEDIUM / LOW with a one-line reason.
+- Your final report is a detailed synthesis for a human domain expert.
+  For each finding include: what was observed, the causal mechanism
+  (WHY), the supporting evidence with its tool source, and what remains
+  uncertain. Do not compress away detail from subagent reports; the
+  word limits that apply to subagents do NOT apply to you.
+- Preserve exact numbers from subagent reports verbatim. Never
+  recompute, re-split, or restate counts (such as per-machine splits);
+  copy them as given, with their sources.
 """
+
         
         @tool
         def call_monitor_agent(prompt: str):
@@ -1550,6 +1573,8 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
             
             # Call supervisor agent to orchestrate the workflow
             supervisor_response = self.supervisor_agent(supervisor_prompt)
+            self._save_agent_output("supervisor_final", supervisor_prompt, supervisor_response)
+            self._save_agent_transcript("supervisor_final", self.supervisor_agent)
             
             end_time = datetime.now()
             

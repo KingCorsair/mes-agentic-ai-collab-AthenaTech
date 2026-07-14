@@ -5,4 +5,11 @@ reports/
 runs/
 industrial-data-store-simulation-chatbot/
 mes.db
+
 .env
+runs/
+reports/
+__pycache__/
+*.pyc
+.venv/
+industrial-data-store-simulation-chatbot/
