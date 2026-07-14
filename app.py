@@ -39,8 +39,8 @@ if 'analysis_running' not in st.session_state:
     st.session_state.analysis_running = False
 
 # Create reports directory
-REPORTS_DIR = Path("reports")
-REPORTS_DIR.mkdir(exist_ok=True)
+REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # JSON serialization helper
 def datetime_to_string(obj):
@@ -68,7 +68,7 @@ def serialize_analysis_results(results):
     return serialized
 
 # Initialize agent manager with caching
-@st.cache_resource
+
 def get_agent_manager():
     """Initialize and cache the MES Agent Manager"""
     try:
@@ -206,17 +206,58 @@ def run_defect_analysis(defect_type: str, days_back: int = 7, include_oee: bool 
                 include_maintenance=include_maintenance
             )
         
-        if analysis_results and analysis_results.get('status') == 'completed':
-            st.success("✅ Complete analysis workflow executed successfully")
-            
-            # Store results in session state
-            st.session_state.current_analysis = analysis_results
-            st.session_state.analysis_started = True
-            print("analysis_results:",analysis_results)
-            return analysis_results
-        else:
-            st.error(f"Analysis failed: {analysis_results.get('error', 'Unknown error')}")
+        if not isinstance(analysis_results, dict):
+            st.error("Analysis failed: no result was returned by the agent manager.")
             return None
+
+        if analysis_results.get("status") != "completed":
+            error_message = analysis_results.get(
+                "error",
+                "The workflow did not complete successfully.",
+            )
+            st.error(f"Analysis failed: {error_message}")
+            return None
+
+        pdf_filename = analysis_results.get("pdf_filename")
+        pdf_path_value = analysis_results.get("pdf_path")
+
+        if not pdf_filename or not pdf_path_value:
+            st.error(
+                "The analysis completed, but no PDF information was returned."
+            )
+            logger.error(
+                "Completed analysis did not contain pdf_filename or pdf_path: %s",
+                analysis_results,
+            )
+            return None
+
+        pdf_path = Path(pdf_path_value)
+
+        if not pdf_path.exists():
+            st.error(
+                f"The analysis completed, but the PDF file was not found: "
+                f"{pdf_path}"
+            )
+            logger.error("Generated PDF does not exist: %s", pdf_path)
+            return None
+
+        if pdf_path.stat().st_size == 0:
+            st.error("The generated PDF file is empty.")
+            logger.error("Generated PDF is empty: %s", pdf_path)
+            return None
+
+        st.success("✅ Analysis and PDF report generated successfully")
+
+        # Store results only after verifying the PDF.
+        st.session_state.current_analysis = analysis_results
+        st.session_state.analysis_started = True
+
+        logger.info(
+            "Analysis completed with report: %s",
+            pdf_path,
+        )
+
+        return analysis_results
         
     except Exception as e:
         st.error(f"Error during analysis: {e}")
@@ -561,7 +602,10 @@ def render_main_dashboard():
                 )
 
                 if analysis_results:
-                    st.success("✅ Analysis completed successfully!")
+                    logger.info(
+                        "Analysis completed. PDF: %s",
+                        analysis_results.get("pdf_filename"),
+                    )
             finally:
                 st.session_state.analysis_running = False
                 st.rerun()
@@ -582,7 +626,40 @@ def render_analysis_results():
     
     st.divider()
     st.subheader(f"📊 Analysis Results: {defect_type}")
-    
+
+    pdf_filename = analysis.get("pdf_filename")
+    pdf_path = REPORTS_DIR / pdf_filename if pdf_filename else None
+
+    if pdf_path and pdf_path.exists():
+        st.success(f"📄 Report generated: {pdf_filename}")
+
+        with open(pdf_path, "rb") as pdf_file:
+            pdf_data = pdf_file.read()
+
+        report_col1, report_col2 = st.columns(2)
+
+        with report_col1:
+            st.download_button(
+                label="📥 Download PDF Report",
+                data=pdf_data,
+                file_name=pdf_filename,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+        with report_col2:
+            if st.button(
+                "👁️ View PDF Report",
+                key=f"view_{pdf_filename}",
+                use_container_width=True,
+            ):
+                st.query_params["pdf"] = pdf_filename
+                st.rerun()
+    else:
+        st.error(
+            "The analysis is available, but its PDF report cannot be found."
+        )
+
     # Results overview
     col1, col2, col3, col4 = st.columns(4)
     

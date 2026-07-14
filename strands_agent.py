@@ -46,6 +46,171 @@ def setup_logging():
 
 logger = setup_logging()
 
+# Use one consistent reports directory beside strands_agent.py.
+REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _md_inline(text):
+    """Escape XML-unsafe chars, then convert inline markdown to ReportLab tags."""
+    text = str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)', r'<i>\1</i>', text)
+    text = re.sub(r'`(.+?)`', r'<font face="Courier">\1</font>', text)
+    return text
+
+def _markdown_to_flowables(text, styles):
+    """Convert a block of markdown-ish agent text into ReportLab flowables."""
+    flowables = []
+    bullet_style = ParagraphStyle('MDBullet', parent=styles['Normal'],
+                                  leftIndent=18, bulletIndent=6, spaceAfter=4)
+    lines = str(text).split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line:
+            continue
+        if re.fullmatch(r'[=\-_*]{3,}', line):
+            flowables.append(Spacer(1, 8))
+            continue
+        if line.startswith('|') and line.endswith('|'):
+            rows = [line]
+            while i < len(lines) and lines[i].strip().startswith('|'):
+                rows.append(lines[i].strip())
+                i += 1
+            data = []
+            for r in rows:
+                cells = [c.strip() for c in r.strip('|').split('|')]
+                if all(re.fullmatch(r':?-{2,}:?', c) for c in cells):
+                    continue
+                data.append([Paragraph(_md_inline(c), styles['Normal'])
+                             for c in cells])
+            if data:
+                tbl = Table(data, hAlign='LEFT')
+                tbl.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ]))
+                flowables.append(tbl)
+                flowables.append(Spacer(1, 10))
+            continue
+        m = re.match(r'(#{1,4})\s+(.*)', line)
+        if m:
+            level = min(len(m.group(1)), 3)
+            flowables.append(Paragraph(_md_inline(m.group(2)),
+                                       styles[f'Heading{level}']))
+            flowables.append(Spacer(1, 6))
+            continue
+        m = re.fullmatch(r'\*\*(.+?)\*\*:?', line)
+        if m:
+            flowables.append(Paragraph(f'<b>{_md_inline(m.group(1))}</b>',
+                                       styles['Heading3']))
+            flowables.append(Spacer(1, 4))
+            continue
+        m = re.match(r'[-*\u2022]\s+(.*)', line)
+        if m:
+            flowables.append(Paragraph(_md_inline(m.group(1)), bullet_style,
+                                       bulletText='\u2022'))
+            continue
+        m = re.match(r'(\d+)[.)]\s+(.*)', line)
+        if m:
+            flowables.append(Paragraph(_md_inline(m.group(2)), bullet_style,
+                                       bulletText=f'{m.group(1)}.'))
+            continue
+        flowables.append(Paragraph(_md_inline(line), styles['Normal']))
+        flowables.append(Spacer(1, 6))
+    return flowables
+
+
+def render_markdown_report_pdf(markdown_text, filename=None):
+    """Render the Supervisor's final markdown report as a PDF."""
+
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError(
+            "ReportLab is not installed in the Python environment "
+            "running Streamlit. Install it with: python -m pip install reportlab"
+        )
+
+    report_text = str(markdown_text).strip()
+
+    if not report_text:
+        raise ValueError("Cannot generate a PDF from an empty report.")
+
+    if filename is None:
+        filename = (
+            f"MES_Final_Report_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+
+    # Avoid creating report.pdf.pdf.
+    if filename.lower().endswith(".pdf"):
+        filename = filename[:-4]
+
+    filepath = REPORTS_DIR / f"{filename}.pdf"
+
+    doc = SimpleDocTemplate(
+        str(filepath),
+        pagesize=A4,
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "CustomTitle",
+        parent=styles["Title"],
+        fontSize=24,
+        spaceAfter=30,
+        textColor=colors.darkblue,
+        alignment=TA_CENTER,
+    )
+
+    story = [
+        Paragraph(
+            "Manufacturing Execution System Analysis Report",
+            title_style,
+        ),
+        Spacer(1, 20),
+        Paragraph(
+            (
+                "Generated: "
+                f"{datetime.now().strftime('%B %d, %Y at %I:%M %p')}"
+            ),
+            styles["Normal"],
+        ),
+        Spacer(1, 20),
+    ]
+
+    story.extend(
+        _markdown_to_flowables(
+            report_text,
+            styles,
+        )
+    )
+
+    doc.build(story)
+
+    if not filepath.exists():
+        raise RuntimeError(
+            f"PDF generation finished, but the file was not created: "
+            f"{filepath.resolve()}"
+        )
+
+    if filepath.stat().st_size == 0:
+        raise RuntimeError(
+            f"The generated PDF is empty: {filepath.resolve()}"
+        )
+
+    logger.info(
+        "PDF successfully generated: %s (%s bytes)",
+        filepath.resolve(),
+        filepath.stat().st_size,
+    )
+
+    return str(filepath.resolve())
+
+
 class MESAgentManager:
     """Manager class for MES agents focused on manufacturing quality analysis"""
     
@@ -60,7 +225,7 @@ class MESAgentManager:
                 db_path = os.path.join(proj_dir, 'mes.db')
         
         if model_id is None:
-            model_id = os.getenv("MES_MODEL_ID", "claude-haiku-4-5-20251001")
+            model_id = os.getenv("MES_MODEL_ID", "claude-sonnet-4-6")
         
         if region_name is None:
             region_name = os.getenv('AWS_REGION', 'us-west-2')
@@ -79,18 +244,23 @@ class MESAgentManager:
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is missing. Add it to your .env file.")
 
-        self.model = AnthropicModel(
-            client_args={
-                "api_key": api_key,
-                "timeout": float(os.getenv("MES_API_TIMEOUT", "90")),
-                "max_retries": int(os.getenv("MES_API_RETRIES", "2")),
-            },
-            model_id=model_id,
-            max_tokens=int(os.getenv("MES_MAX_TOKENS", "8296")),
-            params={
-                "temperature": float(os.getenv("MES_TEMPERATURE", "0.2")),
-            },
+        self._model_id = model_id
+
+        self._model_client_args = {
+            "api_key": api_key,
+            "timeout": float(os.getenv("MES_API_TIMEOUT", "40")),
+            "max_retries": int(os.getenv("MES_API_RETRIES", "2")),
+        }
+
+        self._model_max_tokens = int(
+            os.getenv("MES_MAX_TOKENS", "8296")
         )
+
+        self._model_params = {
+            "temperature": float(
+                os.getenv("MES_TEMPERATURE", "0.2")
+            ),
+        }
 
         self.region_name = region_name
         
@@ -122,6 +292,16 @@ class MESAgentManager:
         self._init_agents()
         self._init_supervisor_agent()
     
+    def _create_model(self):
+        """Create an independent model client for one agent."""
+
+        return AnthropicModel(
+            client_args=dict(self._model_client_args),
+            model_id=self._model_id,
+            max_tokens=self._model_max_tokens,
+            params=dict(self._model_params),
+        )
+
     def get_db_connection(self):
         """Get a database connection"""
         if not os.path.exists(self.db_path):
@@ -885,198 +1065,214 @@ class MESAgentManager:
             
             return action_plan
 
-        def _md_inline(text):
-            """Escape XML-unsafe chars, then convert inline markdown to ReportLab tags."""
-            text = str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-            text = re.sub(r'(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)', r'<i>\1</i>', text)
-            text = re.sub(r'`(.+?)`', r'<font face="Courier">\1</font>', text)
-            return text
-
-        def _markdown_to_flowables(text, styles):
-            """Convert a block of markdown-ish agent text into ReportLab flowables."""
-            flowables = []
-            bullet_style = ParagraphStyle('MDBullet', parent=styles['Normal'],
-                                          leftIndent=18, bulletIndent=6, spaceAfter=4)
-            lines = str(text).split('\n')
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-                i += 1
-                if not line:
-                    continue
-                if re.fullmatch(r'[=\-_*]{3,}', line):
-                    flowables.append(Spacer(1, 8))
-                    continue
-                if line.startswith('|') and line.endswith('|'):
-                    rows = [line]
-                    while i < len(lines) and lines[i].strip().startswith('|'):
-                        rows.append(lines[i].strip())
-                        i += 1
-                    data = []
-                    for r in rows:
-                        cells = [c.strip() for c in r.strip('|').split('|')]
-                        if all(re.fullmatch(r':?-{2,}:?', c) for c in cells):
-                            continue
-                        data.append([Paragraph(_md_inline(c), styles['Normal'])
-                                     for c in cells])
-                    if data:
-                        tbl = Table(data, hAlign='LEFT')
-                        tbl.setStyle(TableStyle([
-                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
-                            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                            ('FONTSIZE', (0, 0), (-1, -1), 8),
-                        ]))
-                        flowables.append(tbl)
-                        flowables.append(Spacer(1, 10))
-                    continue
-                m = re.match(r'(#{1,4})\s+(.*)', line)
-                if m:
-                    level = min(len(m.group(1)), 3)
-                    flowables.append(Paragraph(_md_inline(m.group(2)),
-                                               styles[f'Heading{level}']))
-                    flowables.append(Spacer(1, 6))
-                    continue
-                m = re.fullmatch(r'\*\*(.+?)\*\*:?', line)
-                if m:
-                    flowables.append(Paragraph(f'<b>{_md_inline(m.group(1))}</b>',
-                                               styles['Heading3']))
-                    flowables.append(Spacer(1, 4))
-                    continue
-                m = re.match(r'[-*\u2022]\s+(.*)', line)
-                if m:
-                    flowables.append(Paragraph(_md_inline(m.group(1)), bullet_style,
-                                               bulletText='\u2022'))
-                    continue
-                m = re.match(r'(\d+)[.)]\s+(.*)', line)
-                if m:
-                    flowables.append(Paragraph(_md_inline(m.group(2)), bullet_style,
-                                               bulletText=f'{m.group(1)}.'))
-                    continue
-                flowables.append(Paragraph(_md_inline(line), styles['Normal']))
-                flowables.append(Spacer(1, 6))
-            return flowables
 
         @tool
         def generate_pdf_report(report_data: dict, filename: str = None):
-            """Generate PDF report with analysis findings and action plans"""
+            """Generate a PDF report containing findings and action plans."""
+
             if not REPORTLAB_AVAILABLE:
-                return {"error": "ReportLab not available for PDF generation"}
-            
+                return {
+                    "success": False,
+                    "error": (
+                        "ReportLab is not installed in the Python environment "
+                        "running Streamlit."
+                    ),
+                }
+
             if filename is None:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"MES_Analysis_Report_{timestamp}"
-            
-            # Remove .pdf extension if already present
-            if filename.endswith('.pdf'):
+                filename = (
+                    f"MES_Analysis_Report_"
+                    f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+
+            if filename.lower().endswith(".pdf"):
                 filename = filename[:-4]
-            
-            pdf_filename = filename + '.pdf'
-            
+
+            pdf_filename = f"{filename}.pdf"
+            filepath = REPORTS_DIR / pdf_filename
+
             try:
-                from pathlib import Path
-                reports_dir = Path("reports")
-                reports_dir.mkdir(exist_ok=True)
-                filepath = reports_dir / pdf_filename
-                
-                # Create PDF document
-                doc = SimpleDocTemplate(str(filepath), pagesize=A4)
+                doc = SimpleDocTemplate(
+                    str(filepath),
+                    pagesize=A4,
+                )
+
                 styles = getSampleStyleSheet()
                 story = []
-                
-                # Title
+
                 title_style = ParagraphStyle(
-                    'CustomTitle',
-                    parent=styles['Title'],
+                    "CustomTitle",
+                    parent=styles["Title"],
                     fontSize=24,
                     spaceAfter=30,
                     textColor=colors.darkblue,
-                    alignment=TA_CENTER
+                    alignment=TA_CENTER,
                 )
-                
-                story.append(Paragraph("Manufacturing Execution System Analysis Report", title_style))
+
+                story.append(
+                    Paragraph(
+                        "Manufacturing Execution System Analysis Report",
+                        title_style,
+                    )
+                )
+
                 story.append(Spacer(1, 30))
-                story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", styles['Normal']))
+
+                story.append(
+                    Paragraph(
+                        (
+                            "Generated: "
+                            f"{datetime.now().strftime('%B %d, %Y at %I:%M %p')}"
+                        ),
+                        styles["Normal"],
+                    )
+                )
+
                 story.append(Spacer(1, 20))
-                
-                # Add executive summary if available
-                if 'executive_summary' in report_data:
-                    story.append(Paragraph("Executive Summary", styles['Heading1']))
-                    story.extend(_markdown_to_flowables(report_data['executive_summary'], styles))
+
+                if "executive_summary" in report_data:
+                    story.append(
+                        Paragraph(
+                            "Executive Summary",
+                            styles["Heading1"],
+                        )
+                    )
+
+                    story.extend(
+                        _markdown_to_flowables(
+                            report_data["executive_summary"],
+                            styles,
+                        )
+                    )
+
                     story.append(PageBreak())
-                
-                # Add report content
+
                 for section, content in report_data.items():
-                    if section == 'executive_summary':
-                        continue  # Already handled above
-                        
-                    # Format section title
-                    section_title = section.replace('_', ' ').title()
-                    story.append(Paragraph(section_title, styles['Heading1']))
+                    if section == "executive_summary":
+                        continue
+
+                    section_title = section.replace("_", " ").title()
+
+                    story.append(
+                        Paragraph(
+                            section_title,
+                            styles["Heading1"],
+                        )
+                    )
+
                     story.append(Spacer(1, 12))
-                    
+
                     if isinstance(content, str):
-                        story.extend(_markdown_to_flowables(content, styles))
+                        story.extend(
+                            _markdown_to_flowables(
+                                content,
+                                styles,
+                            )
+                        )
 
                     elif isinstance(content, list):
                         for item in content:
-                            story.extend(_markdown_to_flowables(f"- {item}", styles))
-                                
+                            story.extend(
+                                _markdown_to_flowables(
+                                    f"- {item}",
+                                    styles,
+                                )
+                            )
+
                     elif isinstance(content, dict):
-                        # Handle dictionary content
                         for key, value in content.items():
-                            key_formatted = key.replace('_', ' ').title()
+                            key_formatted = key.replace("_", " ").title()
+
                             if isinstance(value, list):
                                 story.append(
-                                Paragraph(_md_inline(key_formatted), styles["Heading2"])
+                                    Paragraph(
+                                        _md_inline(key_formatted),
+                                        styles["Heading2"],
+                                    )
                                 )
 
                                 for item in value:
                                     story.append(
-                                        Paragraph(_md_inline(item), styles["Normal"])
+                                        Paragraph(
+                                            _md_inline(item),
+                                            styles["Normal"],
+                                        )
                                     )
+
                                     story.append(Spacer(1, 6))
 
                             else:
                                 story.append(
-                                Paragraph(
-                                    f"<b>{_md_inline(key_formatted)}:</b> {_md_inline(value)}",
-                                    styles["Normal"]
+                                    Paragraph(
+                                        (
+                                            f"<b>{_md_inline(key_formatted)}:</b> "
+                                            f"{_md_inline(value)}"
+                                        ),
+                                        styles["Normal"],
                                     )
                                 )
+
                                 story.append(Spacer(1, 6))
-                            
+
                     else:
-                        # Handle other data types
-                        story.extend(_markdown_to_flowables(str(content), styles))
-                        
+                        story.extend(
+                            _markdown_to_flowables(
+                                str(content),
+                                styles,
+                            )
+                        )
+
                     story.append(Spacer(1, 20))
-                
-                # Add footer with timestamp
+
                 story.append(Spacer(1, 30))
-                story.append(Paragraph(f"Report generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", styles['Normal']))
-                
-                # Build PDF
+
+                story.append(
+                    Paragraph(
+                        (
+                            "Report generated on "
+                            f"{datetime.now().strftime('%B %d, %Y at %I:%M %p')}"
+                        ),
+                        styles["Normal"],
+                    )
+                )
+
                 doc.build(story)
-                
+
+                if not filepath.exists():
+                    raise RuntimeError(
+                        f"PDF file was not created: {filepath.resolve()}"
+                    )
+
+                if filepath.stat().st_size == 0:
+                    raise RuntimeError(
+                        f"Generated PDF is empty: {filepath.resolve()}"
+                    )
+
+                logger.info(
+                    "Planner PDF generated: %s (%s bytes)",
+                    filepath.resolve(),
+                    filepath.stat().st_size,
+                )
+
                 return {
                     "success": True,
                     "filename": filename,
                     "pdf_filename": pdf_filename,
-                    "filepath": str(filepath),
-                    "file_size": os.path.getsize(filepath)
+                    "filepath": str(filepath.resolve()),
+                    "file_size": filepath.stat().st_size,
                 }
-                
+
             except Exception as e:
-                logger.error(f"PDF generation error: {e}")
-                return {"error": f"Failed to generate PDF: {str(e)}"}
+                logger.exception("PDF generation error")
+
+                return {
+                    "success": False,
+                    "error": f"Failed to generate PDF: {e}",
+                }
 
         self.planner_tools = [
             create_action_plan,
-            generate_pdf_report
         ]
-
     def _init_verifier_tools(self):
         """Initialize Verifier Agent tools - Handles human validation only"""
         
@@ -1146,6 +1342,14 @@ class MESAgentManager:
   conversation (e.g. fetch_defect_records). Never cite an analysis,
   method, section, or report name as a source.
   A finding you cannot attribute to a tool result must not be stated.
+- In GAPS / MISSING DATA, classify every gap as exactly one of:
+  (a) "absent from database" - only when an explicit tool query for it
+      returned empty over a window that covers the data;
+  (b) "outside analyzed window" - data may exist beyond the days_back
+      window used;
+  (c) "not exposed by available tools" - when no tool returns that
+      kind of data at all.
+  Never state (a) when (b) or (c) could explain the absence.
 - Each KEY FINDING must be followed by one line starting "WHY: " giving
   a 1-2 sentence causal mechanism in plain manufacturing terms (how this
   cause physically produces this defect). If the mechanism is not
@@ -1156,7 +1360,7 @@ class MESAgentManager:
         
         # Monitor Agent - Captures & contextualizes data
         self.monitor_agent = Agent(
-            model=self.model,
+            model=self._create_model(),
             tools=self.monitor_tools + [self.execute_sql_tool],
             system_prompt="""You are the Monitor Agent for a Manufacturing Execution System (MES).
 
@@ -1182,19 +1386,12 @@ When analyzing events, always:
 Focus on capturing complete operational context to enable effective root cause analysis.
 
 DATABASE FACTS: There is no Maintenance, maintenance_log, or CMMS table. Maintenance events are recorded as Reason values (e.g. 'Scheduled Maintenance', 'Cleaning', 'Software Error') inside the Downtimes data, which fetch_downtime_events and fetch_historical_patterns already return. Never query tables not returned by your tools.
-PDF REPORT CONTENT: When calling generate_pdf_report, the report_data
-you pass must carry FULL detail: each finding with its WHY mechanism,
-its evidence and tool sources, the complete rationale for each action,
-and explicit uncertainties. Your word cap applies to your chat reply,
-NOT to the PDF content. Include costs, FTE counts, targets, or
-technical specifications ONLY if they appear in tool results or
-subagent reports; otherwise write "not available in data".
 """ + OUTPUT_RULES
         )
         
         # Analyzer Agent - Identifies root causes and performs reasoning
         self.analyzer_agent = Agent(
-            model=self.model,
+            model=self._create_model(),
             tools=self.analyzer_tools + [self.execute_sql_tool],
             system_prompt="""You are the Analyzer Agent for a Manufacturing Execution System (MES).
 
@@ -1224,15 +1421,14 @@ DATABASE FACTS: There is no Maintenance, maintenance_log, quality_defects, or CM
 """ + OUTPUT_RULES
         )
         
-        # Planner Agent - Suggests actionable plans and creates PDF reports
+        # Planner Agent - Suggests actionable plans
         self.planner_agent = Agent(
-            model=self.model,
+            model=self._create_model(),
             tools=self.planner_tools,
             system_prompt="""You are the Planner Agent for a Manufacturing Execution System (MES).
 
 Your primary responsibilities:
 1. **Action Plan Creation**: Develop prioritized, actionable improvement plans in natural language human readable format
-2. **PDF Report Generation**: Create comprehensive PDF reports with findings and recommendations in good human readable format only
 3. **Resource Planning**: Estimate resources, timelines, and costs for improvements
 4. **Implementation Strategy**: Provide step-by-step implementation guidance
 
@@ -1248,20 +1444,12 @@ Plan structure should include:
 2. **Short-term Actions** (1-3 months): Process improvements and training
 3. **Long-term Actions** (3-12 months): Strategic investments and upgrades
 
-For PDF reports, include:
-- Executive summary with key findings
-- Detailed analysis results
-- Prioritized action plans with timelines
-- Implementation roadmap and success metrics
-
-When generating PDF reports, always return the filename in your response so it can be passed to the Executor Agent for email notifications.
-
 Always focus on measurable, actionable recommendations that improve manufacturing performance.""" + OUTPUT_RULES
         )
         
         # Verifier Agent - Handles human validation only
         self.verifier_agent = Agent(
-            model=self.model,
+            model=self._create_model(),
             tools=self.verifier_tools,
             system_prompt="""You are the Verifier Agent for a Manufacturing Execution System (MES).
 
@@ -1297,7 +1485,7 @@ Note: Email notifications are handled by the Executor Agent.""" + OUTPUT_RULES
 
         # Executor Agent - Sends email notification and call MES APIs to execute actions
         self.executor_agent = Agent(
-            model=self.model,
+            model=self._create_model(),
             tools=self.executor_tools,
             system_prompt="""You are the Executor Agent for a Manufacturing Execution System (MES).
 
@@ -1319,7 +1507,7 @@ Email report should include:
 3. Provide summary of all the issues, findings, root cause analysis
 4. Detailed report attached as received from planner agent
 
-When sending email notifications, it is mandatory to pass PDF filename that is provided from the Planner Agent, include it in the send_email_notification call to attach the PDF link in format(https://dfmw0zqekwl4n.cloudfront.net/proxy/8501/pdf=pdf_filename.pdf?pdf=pdf_filename.pdf) to the email.
+When sending email notifications, it is mandatory to pass the report filename provided in your task instructions, include it in the send_email_notification call to attach the PDF link in format(https://dfmw0zqekwl4n.cloudfront.net/proxy/8501/pdf=pdf_filename.pdf?pdf=pdf_filename.pdf) to the email.
 
 Always focus on clear and concise email body with actionable recommendations, ownership, timeline and risks if not done on time.""" + OUTPUT_RULES
         )
@@ -1347,6 +1535,19 @@ Always focus on clear and concise email body with actionable recommendations, ow
 - Preserve exact numbers from subagent reports verbatim. Never
   recompute, re-split, or restate counts (such as per-machine splits);
   copy them as given, with their sources.
+- Structure the final report with exactly these numbered sections, in
+  this order, each section heading immediately followed by a line
+  "Source: <the tools/agents the section draws on>":
+  1. Defect Occurrence Summary (include a per-occurrence comparison table)
+  2. Maintenance Correlation Findings
+  3. Root Cause Hypotheses (ranked; each with WHY mechanism and
+     HIGH/MEDIUM/LOW certainty)
+  4. Data Reliability Flags (inconsistencies or anomalies in the data
+     itself that must be resolved before conclusions can be trusted)
+  5. Gaps / Missing Data (classified per the GAPS rule)
+  6. Action Plan (immediate / short-term / long-term, from the Planner)
+  7. Verification Outcome and Conditions (from the Verifier)
+  8. Notification Status (from the Executor)
 """
 
         
@@ -1358,37 +1559,25 @@ Always focus on clear and concise email body with actionable recommendations, ow
         @tool
         def call_analyzer_agent(prompt: str):
             """Call the Analyzer Agent to perform root cause analysis"""
-            result = self.analyzer_agent(prompt)
-            self._save_agent_output("analyzer", prompt, result)
-            self._save_agent_transcript("analyzer", self.analyzer_agent)
-            return result
+            return self._call_agent_with_retry("analyzer", self.analyzer_agent, prompt)
         
         @tool
         def call_planner_agent(prompt: str):
             """Call the Planner Agent to create action plans"""
-            result = self.planner_agent(prompt)
-            self._save_agent_output("planner", prompt, result)
-            self._save_agent_transcript("planner", self.planner_agent)
-            return result
+            return self._call_agent_with_retry("planner", self.planner_agent, prompt)
         
         @tool
         def call_verifier_agent(prompt: str):
             """Call the Verifier Agent to validate findings"""
-            result = self.verifier_agent(prompt)
-            self._save_agent_output("verifier", prompt, result)
-            self._save_agent_transcript("verifier", self.verifier_agent)
-            return result
+            return self._call_agent_with_retry("verifier", self.verifier_agent, prompt)
         
         @tool
         def call_executor_agent(prompt: str):
             """"Call the Executor Agent to execute plans and send notifications"""
-            result = self.executor_agent(prompt)
-            self._save_agent_output("executor", prompt, result)
-            self._save_agent_transcript("executor", self.executor_agent)
-            return result
+            return self._call_agent_with_retry("executor", self.executor_agent, prompt)
         
         self.supervisor_agent = Agent(
-            model=self.model,
+            model=self._create_model(),
             tools=[call_monitor_agent, call_analyzer_agent, call_planner_agent, call_verifier_agent, call_executor_agent],
             system_prompt="""You are the Supervisor Agent for the Manufacturing Execution System (MES) AI workflow.
 
@@ -1396,7 +1585,7 @@ Your primary responsibility is to orchestrate the complete defect analysis workf
 
 1. **Monitor Agent**: Captures operational data and contextualizes manufacturing events
 2. **Analyzer Agent**: Performs root cause analysis and identifies correlations
-3. **Planner Agent**: Creates actionable improvement plans and generates reports and return PDF File Name
+3. **Planner Agent**: Creates actionable improvement plans
 4. **Verifier Agent**: Validates findings and manages human validation
 5. **Executor Agent**: Executes action plans and sends email notifications
 
@@ -1406,7 +1595,7 @@ Your primary responsibility is to orchestrate the complete defect analysis workf
 3. Call Analyzer Agent to perform root cause analysis using monitoring data and scope
 4. Call Planner Agent to create action plans based on analysis results and scope
 5. Call Verifier Agent to validate findings within scope
-6. Call Executor Agent to pass PDF file Name, execute immediate actions and send email notifications with PDF link in format(https://dfmw0zqekwl4n.cloudfront.net/proxy/8501/pdf=pdf_filename.pdf?pdf=pdf_filename.pdf)
+6. Call Executor Agent to execute immediate actions and send email notifications, passing the final report filename given in your task instructions
 7. Compile complete analysis results with all agent outputs
 
 **Analysis Scope Parameters:**
@@ -1424,10 +1613,11 @@ Your primary responsibility is to orchestrate the complete defect analysis workf
 - Provide executive summary of complete analysis
 - Respect analysis scope limitations and focus areas
 - Use Executor Agent for one email notification and action execution
-- Pass PDF filename from Planner Agent to Executor Agent for email notifications
 
 **Critical Workflow Note:**
-When calling the Planner Agent, extract the PDF filename from the response and pass it to the Executor Agent when calling for email notifications. This ensures the PDF link is included in the email body.
+Your task instructions include the filename under which your final report
+will be published. Pass that exact filename to the Executor Agent for the
+email notification link. Do not invent or alter it.
 
 **Output Format:**
 Always return a structured analysis result containing:
@@ -1439,7 +1629,7 @@ Always return a structured analysis result containing:
 - Execution results with notification status
 - Executive summary with key findings and recommendations
 
-Focus on ensuring each agent receives appropriate context and scope parameters, and that the complete workflow produces actionable, validated insights for manufacturing quality improvement within the specified analysis scope. All email notifications should be handled through the Executor Agent with proper PDF filename passing.""" + SUPERVISOR_OUTPUT_RULES
+Focus on ensuring each agent receives appropriate context and scope parameters, and that the complete workflow produces actionable, validated insights for manufacturing quality improvement within the specified analysis scope. All email notifications should be handled through the Executor Agent.""" + SUPERVISOR_OUTPUT_RULES
         )
 
     def _save_agent_transcript(self, agent_name: str, agent_obj):
@@ -1526,6 +1716,8 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
 
         try:
             # Create comprehensive prompt for supervisor agent
+            final_report_filename = f"MES_Final_Report_{start_time.strftime('%Y%m%d_%H%M%S')}"
+
             supervisor_prompt = f"""
             Execute comprehensive defect analysis workflow for defect type '{defect_type}' over the last {days_back} days.
             
@@ -1551,7 +1743,6 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
                - Develop comprehensive improvement plans for {defect_type}
                - Address enabled improvement areas: {scope_text}
                - Include immediate, short-term, and long-term actions
-               - Generate PDF report and capture the filename for email notifications
             
             4. **Verification Phase**: Call Verifier Agent to validate findings
                - Validate analysis results and action plans
@@ -1561,64 +1752,159 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
             5. **Execution Phase**: Call Executor Agent to execute actions
                - Execute immediate action items
                - Send email notifications with detailed reports
-               - Include PDF filename from Planner Agent response for email link
+               - Include the final report filename {final_report_filename}.pdf in the email link
                - Coordinate with manufacturing departments
             
             Ensure each agent receives appropriate context from previous phases and respects the analysis scope limitations.
             
-            IMPORTANT: Extract the PDF filename from the Planner Agent response and pass it to the Executor Agent for email notifications.
+            IMPORTANT: The final comprehensive report will be published as {final_report_filename}.pdf. Pass exactly this filename to the Executor Agent for the email notification link.
             
             Compile comprehensive results including all agent outputs and provide executive summary.
             """ 
             
-            # Call supervisor agent to orchestrate the workflow
-            supervisor_response = self.supervisor_agent(supervisor_prompt)
-            self._save_agent_output("supervisor_final", supervisor_prompt, supervisor_response)
-            self._save_agent_transcript("supervisor_final", self.supervisor_agent)
-            
+                        # Call Supervisor Agent to orchestrate the workflow.
+            supervisor_response = self.supervisor_agent(
+                supervisor_prompt
+            )
+
+            self._save_agent_output(
+                "supervisor_final",
+                supervisor_prompt,
+                supervisor_response,
+            )
+
+            self._save_agent_transcript(
+                "supervisor_final",
+                self.supervisor_agent,
+            )
+
+                        # Get the Supervisor's complete final report.
+            supervisor_results = str(supervisor_response).strip()
+
+            if not supervisor_results:
+                raise RuntimeError(
+                    "The Supervisor returned an empty final report."
+                )
+
+            logger.info(
+                "Supervisor final report received: %s characters",
+                len(supervisor_results),
+            )
+
+            # Convert the Supervisor's complete report into one PDF.
+            final_pdf_path = render_markdown_report_pdf(
+                markdown_text=supervisor_results,
+                filename=final_report_filename,
+            )
+
+            final_pdf = Path(final_pdf_path)
+
+            if not final_pdf.exists():
+                raise RuntimeError(
+                    f"The Supervisor PDF was not created: "
+                    f"{final_pdf.resolve()}"
+                )
+
+            if final_pdf.stat().st_size == 0:
+                raise RuntimeError(
+                    f"The Supervisor PDF is empty: "
+                    f"{final_pdf.resolve()}"
+                )
+
+            logger.info(
+                "Supervisor report converted to PDF: %s (%s bytes)",
+                final_pdf.resolve(),
+                final_pdf.stat().st_size,
+            )
+
+            end_time = datetime.now()
+
+            if not supervisor_results or not supervisor_results.strip():
+                raise RuntimeError("Supervisor returned an empty final report.")
+
+            final_pdf_path = render_markdown_report_pdf(
+                supervisor_results,
+                filename=final_report_filename
+            )
+
+            if not final_pdf_path:
+                raise RuntimeError("PDF generation returned no filepath.")
+
+            final_pdf = Path(final_pdf_path)
+
+            if not final_pdf.exists():
+                raise RuntimeError(
+                    f"PDF generation returned a path, but the file was not created: "
+                    f"{final_pdf.resolve()}"
+                )
+
+            if final_pdf.stat().st_size == 0:
+                raise RuntimeError(
+                    f"The generated PDF is empty: {final_pdf.resolve()}"
+                )
+
+            logger.info(
+                "Final PDF generated successfully: %s (%s bytes)",
+                final_pdf.resolve(),
+                final_pdf.stat().st_size,
+            )
+
             end_time = datetime.now()
             
-            # Extract supervisor response content
-            supervisor_results = supervisor_response.message['content'][0]['text']
-            
-            # Compile comprehensive results
+                        
+                        # Compile comprehensive results.
             analysis_results = {
-                'defect_type': defect_type,
-                'analysis_period': days_back,
-                'analysis_scope': {
-                    'include_oee': include_oee,
-                    'include_downtime': include_downtime,
-                    'include_changeover': include_changeover,
-                    'include_maintenance': include_maintenance,
-                    'scope_summary': scope_text
+                "defect_type": defect_type,
+                "analysis_period": days_back,
+                "analysis_scope": {
+                    "include_oee": include_oee,
+                    "include_downtime": include_downtime,
+                    "include_changeover": include_changeover,
+                    "include_maintenance": include_maintenance,
+                    "scope_summary": scope_text,
                 },
-                'start_time': start_time.isoformat(),
-                'end_time': end_time.isoformat(),
-                'total_duration': (end_time - start_time).total_seconds(),
-                'supervisor_orchestration': supervisor_results,
-                'workflow_status': 'completed',
-                'executive_summary': f"""
-                Comprehensive defect analysis completed for {defect_type} defects over {days_back} days using supervisor agent orchestration.
-                Analysis scope: {scope_text}
-                
-                The supervisor agent successfully coordinated all specialized agents to:
-                - Monitor operational data and manufacturing events
-                - Analyze root causes and correlations
-                - Plan actionable improvement strategies
-                - Verify findings and validate recommendations
-                - Execute immediate actions and send notifications
-                
-                Total analysis duration: {(end_time - start_time).total_seconds():.2f} seconds
-                
-                Detailed results from each agent phase are included in the supervisor orchestration output.
-                """,
-                'status': 'completed'
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "total_duration": (
+                    end_time - start_time
+                ).total_seconds(),
+                "supervisor_orchestration": supervisor_results,
+
+                # Confirmed PDF information.
+                "pdf_generated": True,
+                "pdf_path": str(final_pdf.resolve()),
+                "pdf_filename": final_pdf.name,
+                "pdf_size": final_pdf.stat().st_size,
+
+                "workflow_status": "completed",
+                "executive_summary": f"""
+Comprehensive defect analysis completed for {defect_type} defects
+over {days_back} days using Supervisor Agent orchestration.
+
+Analysis scope: {scope_text}
+
+The Supervisor Agent coordinated the specialized agents to:
+- Monitor operational data and manufacturing events
+- Analyze root causes and correlations
+- Plan actionable improvement strategies
+- Verify findings and recommendations
+- Execute immediate actions and send notifications
+
+Total analysis duration:
+{(end_time - start_time).total_seconds():.2f} seconds
+
+PDF report:
+{final_pdf.name}
+                """.strip(),
+                "status": "completed",
             }
-            
+
             return analysis_results
             
         except Exception as e:
-            logger.error(f"Error in supervisor-orchestrated defect analysis workflow: {e}")
+            logger.exception(
+    "Error in supervisor-orchestrated defect analysis workflow"
+)
             return {
                 'defect_type': defect_type,
                 'analysis_period': days_back,
@@ -1708,4 +1994,3 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
         """
         
         return self._execute_safe_query(sql_query, (defect_type, cutoff_date))
-
