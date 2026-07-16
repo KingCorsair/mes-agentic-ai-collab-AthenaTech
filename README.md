@@ -26,8 +26,6 @@ generator), the agent framework (`strands-agents[anthropic]`, `strands-agents-to
 `anthropic`), `boto3[crt]` (used by the email-notification tool), and optional Bedrock
 AgentCore packages.
 
-⚠️ *Not verified in the repository:* there is no `pyproject.toml`, `runtime.txt`, or
-`python_requires` pin anywhere in this project stating a required Python version.
 
 ## Required environment variables
 
