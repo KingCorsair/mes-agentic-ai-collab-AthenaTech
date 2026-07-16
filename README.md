@@ -139,12 +139,6 @@ function, `render_markdown_report_pdf(markdown_text, filename)` (`strands_agent.
    `MES_Final_Report_YYYYMMDD_HHMMSS` (timestamped, not tagged with the defect type). The
    filename is also embedded in the Executor agent's dry-run email as the report link.
 
-⚠️ *Worth flagging:* in the current source, `run_defect_analysis()` calls
-`render_markdown_report_pdf(...)` with the same report text and the same filename **twice in a
-row** (once around line 1795, again around line 1825) — the second call simply re-renders and
-overwrites the same PDF the first call already produced. This looks like redundant/duplicated
-code rather than an intentional retry or draft/final step, but I have not changed it since this
-task is documentation-only.
 
 ## Current limitations
 
