@@ -164,7 +164,4 @@ function, `render_markdown_report_pdf(markdown_text, filename)` (`strands_agent.
   manual defect-type dropdown with an image-based detection step (first a fake detection
   dictionary, later a real model), but this is not present in the current code — the dropdown
   is still the only selection method.
-- ⚠️ *Not verified:* whether `startup.py` and `mes_config.sh` (which references AWS
-  Bedrock-style configuration) are both actively maintained, or whether one is a legacy/
-  experimental alternate path; and whether the SQLite driver used in this environment
-  enforces the read-only convention any harder than what's described above.
+
