@@ -49,10 +49,6 @@ real secret values** — only the variable names and their purpose are listed be
 | `MES_API_RETRIES` | No (defaults to `2`) | Max retries for the Anthropic client |
 | `MES_EMAIL_DRY_RUN` | No (defaults to `true`) | When true, the notification step logs/returns a message instead of actually sending email |
 
-⚠️ *Not verified as active:* `mes_config.sh` in the repo root references a few additional
-variables (`MES_MAX_RETRY_ATTEMPTS`, `MES_RETRY_MODE`, commented-out AWS credential variables)
-that are not read anywhere in the current application code — this looks like config for an
-alternate/legacy Bedrock-based path.
 
 ## How to run it
 
