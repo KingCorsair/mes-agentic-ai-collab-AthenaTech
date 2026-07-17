@@ -4,6 +4,7 @@ Contains Monitor, Analyzer, Planner, and Verifier agents for manufacturing quali
 """
 
 import re
+import itertools
 import logging
 import os
 import sqlite3
@@ -17,6 +18,7 @@ import pandas as pd
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from strands import Agent, tool
+from strands.hooks import BeforeToolCallEvent, AfterToolCallEvent, HookProvider
 from strands.models.anthropic import AnthropicModel
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -211,12 +213,70 @@ def render_markdown_report_pdf(markdown_text, filename=None):
     return str(filepath.resolve())
 
 
+class _ObservabilityHooks(HookProvider):
+    """Strands hook provider shared by all six agents.
+
+    Emits tool_started / tool_completed events through the manager's
+    _emit so the UI can show every tool call any agent makes — the tool
+    name, the arguments the model chose, and what came back.
+    """
+
+    def __init__(self, manager):
+        self._manager = manager
+        # toolUseId -> start time, for per-call durations. Tool calls can
+        # run on SDK worker threads, so keep this a plain dict keyed by
+        # the unique toolUseId rather than assuming call order.
+        self._tool_starts = {}
+
+    def register_hooks(self, registry, **kwargs):
+        registry.add_callback(BeforeToolCallEvent, self._before_tool)
+        registry.add_callback(AfterToolCallEvent, self._after_tool)
+
+    def _before_tool(self, event):
+        tool_use = event.tool_use or {}
+        tool_use_id = tool_use.get("toolUseId")
+        self._tool_starts[tool_use_id] = time.time()
+        self._manager._emit("tool_started", {
+            "tool_name": tool_use.get("name"),
+            "tool_use_id": tool_use_id,
+            "arguments": self._manager._preview(tool_use.get("input"), 300),
+        })
+
+    def _after_tool(self, event):
+        tool_use = event.tool_use or {}
+        tool_use_id = tool_use.get("toolUseId")
+        started = self._tool_starts.pop(tool_use_id, None)
+        payload = {
+            "tool_name": tool_use.get("name"),
+            "tool_use_id": tool_use_id,
+            "duration_ms": round((time.time() - started) * 1000) if started else None,
+        }
+        if event.exception is not None:
+            payload["status"] = "error"
+            payload["error"] = str(event.exception)
+        else:
+            result = event.result or {}
+            payload["status"] = result.get("status", "success") if isinstance(result, dict) else "success"
+            payload["result_preview"] = self._manager._preview(
+                result.get("content", result) if isinstance(result, dict) else result, 400)
+        self._manager._emit("tool_completed", payload)
+
+
 class MESAgentManager:
     """Manager class for MES agents focused on manufacturing quality analysis"""
     
-    def __init__(self, db_path: str = None, model_id: str = None, region_name: str = None):
+    def __init__(self, db_path: str = None, model_id: str = None, region_name: str = None,
+                 on_event=None):
         """Initialize the MES Agent Manager"""
-        
+
+        # Optional observer for the UI: receives structured event dicts
+        # describing everything the agentic system does (see _emit).
+        self.on_event = on_event
+        self._active_agent = None
+        self.event_log = []
+        self._event_seq = itertools.count(1)
+        self._observability_hooks = _ObservabilityHooks(self)
+
         # Get parameters from environment variables with fallbacks
         if db_path is None:
             db_path = os.getenv('MES_DB_PATH')
@@ -302,6 +362,70 @@ class MESAgentManager:
             params=dict(self._model_params),
         )
 
+    def _emit(self, event_type: str, payload: dict = None):
+        """Record one observability event and forward it to the UI callback.
+
+        Called from SDK worker threads as well as the main thread, so it
+        must never touch Streamlit itself — the callback owns delivery
+        (e.g. via a thread-safe queue). A failing callback must never
+        break an analysis run.
+        """
+        event = {
+            "seq": next(self._event_seq),
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "type": event_type,
+            "agent": self._active_agent or "supervisor",
+            "payload": payload or {},
+        }
+        self.event_log.append(event)
+        if self.on_event is not None:
+            try:
+                self.on_event(event)
+            except Exception as e:
+                logger.warning(f"on_event callback failed for {event_type}: {e}")
+        return event
+
+    @staticmethod
+    def _preview(value, limit: int = 300) -> str:
+        """Whitespace-collapsed, length-capped repr for event payloads."""
+        text = " ".join(str(value).split())
+        if len(text) <= limit:
+            return text
+        return text[:limit] + " …[truncated]"
+
+    def _metrics_snapshot(self, agent_obj) -> dict:
+        """Cycle/token/latency summary from an agent's event loop metrics.
+
+        Values are cumulative over the agent object's lifetime; agents are
+        rebuilt per manager, so per-run they are effectively per-agent totals.
+        """
+        try:
+            metrics = getattr(agent_obj, "event_loop_metrics", None)
+            if metrics is None or not hasattr(metrics, "get_summary"):
+                return {}
+            summary = metrics.get_summary()
+            usage = summary.get("accumulated_usage", {}) or {}
+            return {
+                "cycles": summary.get("total_cycles"),
+                "model_seconds": round(summary.get("total_duration") or 0, 1),
+                "input_tokens": usage.get("inputTokens"),
+                "output_tokens": usage.get("outputTokens"),
+            }
+        except Exception as e:
+            logger.warning(f"Metrics snapshot failed: {e}")
+            return {}
+
+    def _save_event_log(self):
+        """Persist the run's event log next to the other run artifacts."""
+        try:
+            run_dir = getattr(self, "current_run_dir", None)
+            if run_dir is None or not self.event_log:
+                return
+            lines = "\n".join(json.dumps(e, default=str) for e in self.event_log)
+            (run_dir / "events.jsonl").write_text(lines + "\n", encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Event log persistence failed: {e}")
+
     def get_db_connection(self):
         """Get a database connection"""
         if not os.path.exists(self.db_path):
@@ -349,10 +473,16 @@ class MESAgentManager:
                 "execution_time_ms": round((time.time() - start_time) * 1000, 2),
                 "dataframe": df
             }
-            
+
             logger.info(f"Query executed successfully: {len(df)} rows returned")
+            self._emit("sql_executed", {
+                "sql": self._preview(query, 600),
+                "params": self._preview(params, 200) if params else None,
+                "row_count": len(df),
+                "execution_time_ms": result["execution_time_ms"],
+            })
             return result
-            
+
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Error executing SQL query: {error_msg}")
@@ -361,6 +491,12 @@ class MESAgentManager:
                 "error": error_msg,
                 "execution_time_ms": round((time.time() - start_time) * 1000, 2)
             }
+            self._emit("sql_failed", {
+                "sql": self._preview(query, 600),
+                "params": self._preview(params, 200) if params else None,
+                "error": error_msg,
+                "execution_time_ms": error_result["execution_time_ms"],
+            })
             return error_result
     
     def _init_database_tools(self):
@@ -419,6 +555,11 @@ class MESAgentManager:
             else:
                 # For security, only allow predefined queries
                 logger.warning(f"Query not in allowed list: {sql_query}")
+                self._emit("guardrail_triggered", {
+                    "guardrail": "sql_allowlist",
+                    "attempted_query": self._preview(sql_query, 400),
+                    "outcome": "rejected - only predefined safe queries are allowed",
+                })
                 return {
                     "success": False,
                     "error": "Only predefined safe queries are allowed for security reasons"
@@ -1363,6 +1504,7 @@ class MESAgentManager:
         # Monitor Agent - Captures & contextualizes data
         self.monitor_agent = Agent(
             model=self._create_model(),
+            hooks=[self._observability_hooks],
             tools=self.monitor_tools + [self.execute_sql_tool],
             system_prompt="""You are the Monitor Agent for a Manufacturing Execution System (MES).
 
@@ -1394,6 +1536,7 @@ DATABASE FACTS: There is no Maintenance, maintenance_log, or CMMS table. Mainten
         # Analyzer Agent - Identifies root causes and performs reasoning
         self.analyzer_agent = Agent(
             model=self._create_model(),
+            hooks=[self._observability_hooks],
             tools=self.analyzer_tools + [self.execute_sql_tool],
             system_prompt="""You are the Analyzer Agent for a Manufacturing Execution System (MES).
 
@@ -1426,6 +1569,7 @@ DATABASE FACTS: There is no Maintenance, maintenance_log, quality_defects, or CM
         # Planner Agent - Suggests actionable plans
         self.planner_agent = Agent(
             model=self._create_model(),
+            hooks=[self._observability_hooks],
             tools=self.planner_tools,
             system_prompt="""You are the Planner Agent for a Manufacturing Execution System (MES).
 
@@ -1452,6 +1596,7 @@ Always focus on measurable, actionable recommendations that improve manufacturin
         # Verifier Agent - Handles human validation only
         self.verifier_agent = Agent(
             model=self._create_model(),
+            hooks=[self._observability_hooks],
             tools=self.verifier_tools,
             system_prompt="""You are the Verifier Agent for a Manufacturing Execution System (MES).
 
@@ -1488,6 +1633,7 @@ Note: Email notifications are handled by the Executor Agent.""" + OUTPUT_RULES
         # Executor Agent - Sends email notification and call MES APIs to execute actions
         self.executor_agent = Agent(
             model=self._create_model(),
+            hooks=[self._observability_hooks],
             tools=self.executor_tools,
             system_prompt="""You are the Executor Agent for a Manufacturing Execution System (MES).
 
@@ -1580,6 +1726,7 @@ Always focus on clear and concise email body with actionable recommendations, ow
         
         self.supervisor_agent = Agent(
             model=self._create_model(),
+            hooks=[self._observability_hooks],
             tools=[call_monitor_agent, call_analyzer_agent, call_planner_agent, call_verifier_agent, call_executor_agent],
             system_prompt="""You are the Supervisor Agent for the Manufacturing Execution System (MES) AI workflow.
 
@@ -1667,20 +1814,43 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
     def _call_agent_with_retry(self, agent_name: str, agent_obj, prompt: str):
         """Run an agent turn; on failure (timeout/connection), retry once."""
         last_error = None
-        for attempt in (1, 2):
-            try:
-                result = agent_obj(prompt)
-                self._save_agent_output(agent_name, prompt, result)
-                self._save_agent_transcript(agent_name, agent_obj)
-                self._save_agent_metrics(agent_name, agent_obj)
-                return result
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    f"{agent_name} agent attempt {attempt} failed: {e}"
-                    + (" - retrying once" if attempt == 1 else " - giving up"))
-        return (f"[{agent_name} agent unavailable after 2 attempts: {last_error}. "
-                f"Proceed with available information and state this gap explicitly.]")
+        # Emitted before _active_agent switches, so this event is tagged
+        # with the delegator (supervisor) — prompts flow downward.
+        self._emit("agent_started", {
+            "agent_name": agent_name,
+            "delegation_prompt": str(prompt),
+        })
+        prev_agent = self._active_agent
+        self._active_agent = agent_name
+        started = time.time()
+        try:
+            for attempt in (1, 2):
+                try:
+                    result = agent_obj(prompt)
+                    self._save_agent_output(agent_name, prompt, result)
+                    self._save_agent_transcript(agent_name, agent_obj)
+                    self._save_agent_metrics(agent_name, agent_obj)
+                    self._emit("agent_completed", {
+                        "agent_name": agent_name,
+                        "duration_s": round(time.time() - started, 1),
+                        "result_preview": self._preview(result, 500),
+                        "metrics": self._metrics_snapshot(agent_obj),
+                    })
+                    return result
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        f"{agent_name} agent attempt {attempt} failed: {e}"
+                        + (" - retrying once" if attempt == 1 else " - giving up"))
+                    self._emit("agent_retry" if attempt == 1 else "agent_failed", {
+                        "agent_name": agent_name,
+                        "attempt": attempt,
+                        "error": str(e),
+                    })
+            return (f"[{agent_name} agent unavailable after 2 attempts: {last_error}. "
+                    f"Proceed with available information and state this gap explicitly.]")
+        finally:
+            self._active_agent = prev_agent
 
     def _save_agent_output(self, agent_name: str, prompt: str, result):
         """Write an agent's input and output into the current run folder."""
@@ -1730,6 +1900,16 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
         run_log_handler = logging.FileHandler(self.current_run_dir / "run.log", encoding="utf-8")
         run_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
         logging.getLogger().addHandler(run_log_handler)
+
+        # Fresh event stream per run (the manager may be reused).
+        self.event_log = []
+        self._event_seq = itertools.count(1)
+        self._emit("run_started", {
+            "defect_type": defect_type,
+            "days_back": days_back,
+            "scope": scope_text,
+            "run_id": run_id,
+        })
 
         try:
             # Create comprehensive prompt for supervisor agent
@@ -1791,6 +1971,11 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
             )
 
             self._save_agent_transcript(
+                "supervisor_final",
+                self.supervisor_agent,
+            )
+
+            self._save_agent_metrics(
                 "supervisor_final",
                 self.supervisor_agent,
             )
@@ -1916,12 +2101,18 @@ PDF report:
                 "status": "completed",
             }
 
+            self._emit("run_completed", {
+                "status": "completed",
+                "duration_s": round((end_time - start_time).total_seconds(), 1),
+                "pdf_filename": final_pdf.name,
+            })
             return analysis_results
-            
+
         except Exception as e:
             logger.exception(
     "Error in supervisor-orchestrated defect analysis workflow"
 )
+            self._emit("run_failed", {"error": str(e)})
             return {
                 'defect_type': defect_type,
                 'analysis_period': days_back,
@@ -1939,6 +2130,7 @@ PDF report:
             }
         
         finally:
+            self._save_event_log()
             logging.getLogger().removeHandler(run_log_handler)
             run_log_handler.close()
 
