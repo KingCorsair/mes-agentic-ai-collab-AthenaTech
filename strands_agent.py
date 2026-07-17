@@ -316,6 +316,8 @@ class MESAgentManager:
     def _execute_safe_query(self, query: str, params: tuple = None):
         """Execute SQL query safely with parameterized queries"""
         logger.info(f"Executing parameterized SQL query")
+        logger.debug(f"SQL: {' '.join(str(query).split())[:300]}")
+        logger.debug(f"SQL params: {params}")
         start_time = time.time()
         
         try:
@@ -1632,6 +1634,20 @@ Always return a structured analysis result containing:
 Focus on ensuring each agent receives appropriate context and scope parameters, and that the complete workflow produces actionable, validated insights for manufacturing quality improvement within the specified analysis scope. All email notifications should be handled through the Executor Agent.""" + SUPERVISOR_OUTPUT_RULES
         )
 
+    def _save_agent_metrics(self, agent_name: str, agent_obj):
+        """Write the agent's token/cycle metrics into the current run folder."""
+        try:
+            run_dir = getattr(self, "current_run_dir", None)
+            metrics = getattr(agent_obj, "event_loop_metrics", None)
+            if run_dir is None or metrics is None:
+                return
+            summary = metrics.get_summary() if hasattr(metrics, "get_summary") else str(metrics)
+            ts = datetime.now().strftime('%H%M%S')
+            (run_dir / f"{ts}_{agent_name}_metrics.json").write_text(
+                json.dumps(summary, indent=2, default=str), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Metrics capture failed for {agent_name}: {e}")
+
     def _save_agent_transcript(self, agent_name: str, agent_obj):
         """Dump the agent's full internal conversation: every turn,
         every tool call with arguments, every raw tool result."""
@@ -1656,6 +1672,7 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
                 result = agent_obj(prompt)
                 self._save_agent_output(agent_name, prompt, result)
                 self._save_agent_transcript(agent_name, agent_obj)
+                self._save_agent_metrics(agent_name, agent_obj)
                 return result
             except Exception as e:
                 last_error = e
