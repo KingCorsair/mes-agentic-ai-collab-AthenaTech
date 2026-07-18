@@ -18,7 +18,7 @@ import pandas as pd
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from strands import Agent, tool
-from strands.hooks import BeforeToolCallEvent, AfterToolCallEvent, HookProvider
+from strands.hooks import BeforeToolCallEvent, AfterToolCallEvent, HookProvider, MessageAddedEvent
 from strands.models.anthropic import AnthropicModel
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -218,7 +218,10 @@ class _ObservabilityHooks(HookProvider):
 
     Emits tool_started / tool_completed events through the manager's
     _emit so the UI can show every tool call any agent makes — the tool
-    name, the arguments the model chose, and what came back.
+    name, the arguments the model chose, and what came back. Also emits
+    agent_message events carrying the assistant text an agent produces
+    between tool calls (the Supervisor's plan/synthesis narrative and
+    each subagent's stated reasoning).
     """
 
     def __init__(self, manager):
@@ -231,6 +234,25 @@ class _ObservabilityHooks(HookProvider):
     def register_hooks(self, registry, **kwargs):
         registry.add_callback(BeforeToolCallEvent, self._before_tool)
         registry.add_callback(AfterToolCallEvent, self._after_tool)
+        registry.add_callback(MessageAddedEvent, self._on_message)
+
+    def _on_message(self, event):
+        """Forward the assistant text an agent writes between tool calls.
+
+        This is the agent's visible reasoning — e.g. the Supervisor saying
+        which agent it will delegate to next and why, or its final
+        synthesis. Tool-use blocks and tool-result (user-role) messages
+        already surface via the tool hooks, so only assistant text is sent.
+        """
+        message = event.message or {}
+        if message.get("role") != "assistant":
+            return
+        blocks = message.get("content") or []
+        texts = [b.get("text", "").strip() for b in blocks if isinstance(b, dict) and b.get("text")]
+        text = "\n\n".join(t for t in texts if t)
+        if not text:
+            return
+        self._manager._emit("agent_message", {"text": text[:4000]})
 
     def _before_tool(self, event):
         tool_use = event.tool_use or {}

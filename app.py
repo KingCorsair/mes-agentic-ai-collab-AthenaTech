@@ -199,9 +199,10 @@ def _clip_text(text, limit):
 
 def _group_events(events):
     """Fold the flat event list into a run header plus a chronological
-    timeline of agent activations and supervisor-level items.
+    timeline of subagent activations and, between them, the Supervisor's
+    own activity (its reasoning text and any direct tool use).
 
-    Timeline entries are ("activation", dict) or ("item", event)."""
+    Timeline entries are ("activation", dict) or ("supervisor", dict)."""
     run = {"started": None, "completed": None, "failed": None}
     timeline = []
     current = None
@@ -248,7 +249,11 @@ def _group_events(events):
             if current is not None:
                 current["items"].append(event)
             else:
-                timeline.append(("item", event))
+                # Between delegations this is the Supervisor acting on its
+                # own; group consecutive events into one timeline entry.
+                if not (timeline and timeline[-1][0] == "supervisor"):
+                    timeline.append(("supervisor", {"items": []}))
+                timeline[-1][1]["items"].append(event)
 
     return run, timeline
 
@@ -285,19 +290,19 @@ def _render_event_items(items, detail=False):
                     if detail and done_payload.get("result_preview"):
                         st.caption("Result preview:")
                         st.code(done_payload["result_preview"], language=None)
-        elif etype == "sql_executed":
+        elif etype == "agent_message":
+            text = payload.get("text", "")
             if detail:
-                st.code(payload.get("sql", ""), language="sql")
-                params = payload.get("params")
-                st.caption(
-                    f"params: {params or '—'} → {payload.get('row_count')} rows"
-                    f" · {payload.get('execution_time_ms')} ms"
-                )
+                st.markdown("> " + text.replace("\n", "\n> "))
             else:
-                st.caption(
-                    f"🗄️ SQL → {payload.get('row_count')} rows"
-                    f" · {payload.get('execution_time_ms')} ms"
-                )
+                st.markdown(f"💬 {_clip_text(text, 500)}")
+        elif etype == "sql_executed":
+            st.code(payload.get("sql", ""), language="sql")
+            params = payload.get("params")
+            st.caption(
+                f"🗄️ params: {params or '—'} → {payload.get('row_count')} rows"
+                f" · {payload.get('execution_time_ms')} ms"
+            )
         elif etype == "sql_failed":
             st.warning(
                 f"🗄️ SQL failed: {payload.get('error')}\n\n"
@@ -339,26 +344,34 @@ def render_live_feed(events, running=True):
         )
 
     open_activation = False
-    for kind, entry in timeline:
-        if kind == "item":
-            _render_event_items([entry])
+    seen_activation = False
+    for index, (kind, entry) in enumerate(timeline):
+        if kind == "supervisor":
+            if not seen_activation:
+                label = "🧠 Supervisor Agent — planning the workflow"
+            elif index == len(timeline) - 1 and (run["completed"] or run["failed"]):
+                label = "🧠 Supervisor Agent — final synthesis"
+            else:
+                label = "🧠 Supervisor Agent — coordinating the next step"
+            with st.status(label, state="complete", expanded=True):
+                _render_event_items(entry["items"])
             continue
 
+        seen_activation = True
         if entry["status"] == "running":
             open_activation = True
             label = f"{_agent_label(entry['agent_name'])} — working…"
             state = "running"
-            expanded = True
         elif entry["status"] == "failed":
             label = f"{_agent_label(entry['agent_name'])} — failed"
             state = "error"
-            expanded = True
         else:
             label = f"{_agent_label(entry['agent_name'])} — done in {entry['duration_s']}s"
             state = "complete"
-            expanded = False
 
-        with st.status(label, state=state, expanded=expanded):
+        # Stay expanded after completion so the class can review each
+        # agent's steps without re-opening every box.
+        with st.status(label, state=state, expanded=True):
             st.caption(f"Task from Supervisor: {_clip_text(entry['prompt'], 220)}")
             _render_event_items(entry["items"])
             if entry["error"]:
@@ -401,8 +414,9 @@ def render_trace(events):
         )
 
     for kind, entry in timeline:
-        if kind == "item":
-            _render_event_items([entry], detail=True)
+        if kind == "supervisor":
+            with st.expander("🧠 Supervisor Agent — reasoning between delegations", expanded=True):
+                _render_event_items(entry["items"], detail=True)
             continue
 
         tool_calls = sum(1 for e in entry["items"] if e.get("type") == "tool_started")
@@ -410,7 +424,7 @@ def render_trace(events):
                        "running": "interrupted"}.get(entry["status"], "")
         header = f"{_agent_label(entry['agent_name'])} — {tool_calls} tool call(s) · {status_text}"
 
-        with st.expander(header):
+        with st.expander(header, expanded=True):
             st.markdown("**Delegation prompt from the Supervisor:**")
             st.code(entry["prompt"], language=None)
             if entry["items"]:
@@ -610,11 +624,15 @@ def render_defect_selection():
             
             return None
         
-        # Defect type dropdown
+        # Defect type dropdown. The widget's own state is destroyed whenever
+        # the sidebar doesn't render (e.g. the PDF viewer's early return), so
+        # restore the previous choice from session state instead of index=0.
+        options = [None] + defect_types
+        previous = st.session_state.get("selected_defect")
         selected_defect = st.selectbox(
             "Select Event Type for Analysis:",
-            options=[None] + defect_types,
-            index=0,
+            options=options,
+            index=options.index(previous) if previous in options else 0,
             disabled=st.session_state.analysis_running,
             format_func=lambda x: "-- Select an Event type --" if x is None else x,
             help="Choose a specific defect type to analyze using the AI agent workflow"
@@ -924,14 +942,15 @@ def render_main_dashboard():
             finally:
                 st.session_state.analysis_running = False
                 st.rerun()
-                                
-        elif st.session_state.analysis_started and st.session_state.current_analysis:
-            # Show completed results
-            render_analysis_results()
-            
-        else:
-            # Show welcome message
-            st.info("👈 Please select a defect type from the sidebar to begin analysis")
+
+    # Results render independently of the selectbox so a rerun where the
+    # widget lost its selection (e.g. returning from the PDF viewer) doesn't
+    # wipe the completed analysis from view.
+    if st.session_state.analysis_started and st.session_state.current_analysis:
+        render_analysis_results()
+    elif not selected_defect:
+        # Show welcome message
+        st.info("👈 Please select a defect type from the sidebar to begin analysis")
                 
 def render_analysis_results():
     """Render comprehensive analysis results"""
