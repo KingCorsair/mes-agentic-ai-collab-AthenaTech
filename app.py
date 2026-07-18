@@ -9,8 +9,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import sys
 import os
-import json 
+import json
 import logging
+import queue
+import threading
 import time
 from pathlib import Path
 import base64
@@ -167,6 +169,272 @@ def display_pdf_viewer(pdf_path):
         st.error(f"Error displaying PDF: {e}")
         return None
 
+# ---------------------------------------------------------------------------
+# Observability event feed
+#
+# MESAgentManager emits structured event dicts (see strands_agent._emit) from
+# SDK worker threads. The two renderers below draw the same events two ways:
+# a compact live feed redrawn while the analysis thread works, and a full
+# post-run "under the hood" trace for the pupil to explore.
+# ---------------------------------------------------------------------------
+
+AGENT_LABELS = {
+    "monitor": "📡 Monitor Agent",
+    "analyzer": "🔬 Analyzer Agent",
+    "planner": "📋 Planner Agent",
+    "verifier": "✅ Verifier Agent",
+    "executor": "📧 Executor Agent",
+    "supervisor": "🧠 Supervisor Agent",
+}
+
+
+def _agent_label(agent_name):
+    return AGENT_LABELS.get(agent_name, f"🤖 {agent_name}")
+
+
+def _clip_text(text, limit):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _group_events(events):
+    """Fold the flat event list into a run header plus a chronological
+    timeline of agent activations and supervisor-level items.
+
+    Timeline entries are ("activation", dict) or ("item", event)."""
+    run = {"started": None, "completed": None, "failed": None}
+    timeline = []
+    current = None
+
+    for event in events:
+        etype = event.get("type")
+        payload = event.get("payload") or {}
+
+        if etype == "run_started":
+            run["started"] = event
+        elif etype == "run_completed":
+            run["completed"] = event
+        elif etype == "run_failed":
+            run["failed"] = event
+        elif etype == "agent_started":
+            current = {
+                "agent_name": payload.get("agent_name"),
+                "prompt": payload.get("delegation_prompt", ""),
+                "items": [],
+                "status": "running",
+                "duration_s": None,
+                "metrics": {},
+                "result_preview": "",
+                "error": None,
+            }
+            timeline.append(("activation", current))
+        elif etype in ("agent_completed", "agent_failed"):
+            if current is not None and payload.get("agent_name") == current["agent_name"]:
+                if etype == "agent_completed":
+                    current["status"] = "completed"
+                    current["duration_s"] = payload.get("duration_s")
+                    current["metrics"] = payload.get("metrics") or {}
+                    current["result_preview"] = payload.get("result_preview", "")
+                else:
+                    current["status"] = "failed"
+                    current["error"] = payload.get("error")
+                current = None
+        else:
+            # The supervisor's call_*_agent tool events duplicate the
+            # agent_started/agent_completed pair — skip them.
+            tool_name = str(payload.get("tool_name") or "")
+            if etype in ("tool_started", "tool_completed") and tool_name.startswith("call_"):
+                continue
+            if current is not None:
+                current["items"].append(event)
+            else:
+                timeline.append(("item", event))
+
+    return run, timeline
+
+
+def _render_event_items(items, detail=False):
+    """Render an activation's tool/SQL/guardrail events as feed lines.
+
+    tool_started/tool_completed pairs (matched on tool_use_id) collapse
+    into a single line; SQL events emitted between them show below."""
+    completed_by_id = {}
+    for event in items:
+        if event.get("type") == "tool_completed":
+            tool_id = (event.get("payload") or {}).get("tool_use_id")
+            completed_by_id.setdefault(tool_id, event)
+
+    for event in items:
+        etype = event.get("type")
+        payload = event.get("payload") or {}
+
+        if etype == "tool_started":
+            name = payload.get("tool_name")
+            args = _clip_text(payload.get("arguments"), 300 if detail else 110)
+            done = completed_by_id.get(payload.get("tool_use_id"))
+            if done is None:
+                st.markdown(f"🔧 `{name}({args})` — running…")
+            else:
+                done_payload = done.get("payload") or {}
+                duration = done_payload.get("duration_ms")
+                duration_text = f" · {duration} ms" if duration is not None else ""
+                if done_payload.get("status") == "error":
+                    st.warning(f"🔧 `{name}({args})` failed: {done_payload.get('error')}")
+                else:
+                    st.markdown(f"🔧 `{name}({args})`{duration_text}")
+                    if detail and done_payload.get("result_preview"):
+                        st.caption("Result preview:")
+                        st.code(done_payload["result_preview"], language=None)
+        elif etype == "sql_executed":
+            if detail:
+                st.code(payload.get("sql", ""), language="sql")
+                params = payload.get("params")
+                st.caption(
+                    f"params: {params or '—'} → {payload.get('row_count')} rows"
+                    f" · {payload.get('execution_time_ms')} ms"
+                )
+            else:
+                st.caption(
+                    f"🗄️ SQL → {payload.get('row_count')} rows"
+                    f" · {payload.get('execution_time_ms')} ms"
+                )
+        elif etype == "sql_failed":
+            st.warning(
+                f"🗄️ SQL failed: {payload.get('error')}\n\n"
+                f"`{_clip_text(payload.get('sql'), 200)}`"
+            )
+        elif etype == "guardrail_triggered":
+            st.warning(
+                f"🛡️ Guardrail **{payload.get('guardrail')}** blocked: "
+                f"`{_clip_text(payload.get('attempted_query'), 200)}` — {payload.get('outcome')}"
+            )
+        elif etype == "agent_retry":
+            st.warning(
+                f"🔁 Attempt {payload.get('attempt')} failed, retrying: {payload.get('error')}"
+            )
+
+
+def _metrics_caption(metrics):
+    if not metrics:
+        return None
+    parts = []
+    if metrics.get("cycles") is not None:
+        parts.append(f"{metrics['cycles']} model round-trips")
+    if metrics.get("input_tokens") is not None:
+        parts.append(f"{metrics['input_tokens']:,} tokens in / {metrics.get('output_tokens', 0):,} out")
+    if metrics.get("model_seconds"):
+        parts.append(f"{metrics['model_seconds']}s model time")
+    return " · ".join(parts) if parts else None
+
+
+def render_live_feed(events, running=True):
+    """Redrawable live view of the run so far (call inside a fresh container)."""
+    run, timeline = _group_events(events)
+
+    if run["started"]:
+        payload = run["started"]["payload"]
+        st.caption(
+            f"Run started — {payload.get('defect_type')}, last {payload.get('days_back')} days"
+            f" · scope: {payload.get('scope')}"
+        )
+
+    open_activation = False
+    for kind, entry in timeline:
+        if kind == "item":
+            _render_event_items([entry])
+            continue
+
+        if entry["status"] == "running":
+            open_activation = True
+            label = f"{_agent_label(entry['agent_name'])} — working…"
+            state = "running"
+            expanded = True
+        elif entry["status"] == "failed":
+            label = f"{_agent_label(entry['agent_name'])} — failed"
+            state = "error"
+            expanded = True
+        else:
+            label = f"{_agent_label(entry['agent_name'])} — done in {entry['duration_s']}s"
+            state = "complete"
+            expanded = False
+
+        with st.status(label, state=state, expanded=expanded):
+            st.caption(f"Task from Supervisor: {_clip_text(entry['prompt'], 220)}")
+            _render_event_items(entry["items"])
+            if entry["error"]:
+                st.error(entry["error"])
+            footer = _metrics_caption(entry["metrics"])
+            if footer:
+                st.caption(footer)
+
+    if run["completed"]:
+        payload = run["completed"]["payload"]
+        st.success(
+            f"Analysis complete in {payload.get('duration_s')}s — "
+            f"report {payload.get('pdf_filename')}"
+        )
+    elif run["failed"]:
+        st.error(f"Analysis failed: {run['failed']['payload'].get('error')}")
+    elif running and not open_activation:
+        # Between delegations the Supervisor itself is reasoning.
+        label = ("🧠 Supervisor Agent — synthesizing…" if any(k == "activation" for k, _ in timeline)
+                 else "🧠 Supervisor Agent — planning the workflow…")
+        st.status(label, state="running")
+
+
+def render_trace(events):
+    """Full post-run trace: every delegation prompt, tool call, SQL query
+    and result preview, one expander per agent activation."""
+    run, timeline = _group_events(events)
+
+    st.caption(
+        "Every step the agent system took, in order. Prompts flow down from "
+        "the Supervisor to the subagents; each subagent chooses tools, the "
+        "tools run SQL against the MES database, and findings flow back up."
+    )
+
+    if run["started"]:
+        payload = run["started"]["payload"]
+        st.markdown(
+            f"**Run:** {payload.get('defect_type')} · last {payload.get('days_back')} days"
+            f" · scope: {payload.get('scope')} · id `{payload.get('run_id')}`"
+        )
+
+    for kind, entry in timeline:
+        if kind == "item":
+            _render_event_items([entry], detail=True)
+            continue
+
+        tool_calls = sum(1 for e in entry["items"] if e.get("type") == "tool_started")
+        status_text = {"completed": f"{entry['duration_s']}s", "failed": "FAILED",
+                       "running": "interrupted"}.get(entry["status"], "")
+        header = f"{_agent_label(entry['agent_name'])} — {tool_calls} tool call(s) · {status_text}"
+
+        with st.expander(header):
+            st.markdown("**Delegation prompt from the Supervisor:**")
+            st.code(entry["prompt"], language=None)
+            if entry["items"]:
+                st.markdown("**What the agent did:**")
+                _render_event_items(entry["items"], detail=True)
+            if entry["result_preview"]:
+                st.markdown("**Returned to the Supervisor:**")
+                st.code(entry["result_preview"], language=None)
+            if entry["error"]:
+                st.error(entry["error"])
+            footer = _metrics_caption(entry["metrics"])
+            if footer:
+                st.caption(footer)
+
+    if run["completed"]:
+        payload = run["completed"]["payload"]
+        st.markdown(
+            f"**Outcome:** completed in {payload.get('duration_s')}s — "
+            f"final report `{payload.get('pdf_filename')}`"
+        )
+    elif run["failed"]:
+        st.error(f"Run failed: {run['failed']['payload'].get('error')}")
+
+
 def run_defect_analysis(defect_type: str, days_back: int = 7, include_oee: bool = True, include_downtime: bool = True, include_changeover: bool = True, include_maintenance: bool = True):
     """Run comprehensive defect analysis using the supervisor agent"""
     
@@ -195,17 +463,64 @@ def run_defect_analysis(defect_type: str, days_back: int = 7, include_oee: bool 
         else:
             st.warning("**No analysis scope selected** - Running basic analysis only")
         
-        with st.spinner(f'Running comprehensive analysis for {defect_type} using AI agent workflow...'):
-            # Use the supervisor agent to run the complete analysis
-            analysis_results = agent_manager.run_defect_analysis(
-                defect_type=defect_type, 
-                days_back=days_back,
-                include_oee=include_oee,
-                include_downtime=include_downtime,
-                include_changeover=include_changeover,
-                include_maintenance=include_maintenance
-            )
-        
+        # The manager emits observability events from SDK worker threads,
+        # which must never touch Streamlit directly. So: events go into a
+        # thread-safe queue, the analysis runs in a background thread, and
+        # this (main) thread polls the queue and redraws the live feed.
+        event_queue = queue.Queue()
+        agent_manager.on_event = event_queue.put
+
+        run_outcome = {}
+
+        def _analysis_worker():
+            try:
+                run_outcome["result"] = agent_manager.run_defect_analysis(
+                    defect_type=defect_type,
+                    days_back=days_back,
+                    include_oee=include_oee,
+                    include_downtime=include_downtime,
+                    include_changeover=include_changeover,
+                    include_maintenance=include_maintenance
+                )
+            except Exception as worker_error:
+                run_outcome["error"] = worker_error
+
+        worker = threading.Thread(target=_analysis_worker, daemon=True)
+        worker.start()
+
+        st.markdown("#### 🔍 Live agent activity")
+        feed_placeholder = st.empty()
+        events = []
+        with feed_placeholder.container():
+            render_live_feed(events)
+
+        while worker.is_alive() or not event_queue.empty():
+            drained = False
+            while True:
+                try:
+                    events.append(event_queue.get_nowait())
+                    drained = True
+                except queue.Empty:
+                    break
+            if drained:
+                with feed_placeholder.container():
+                    render_live_feed(events)
+            time.sleep(0.4)
+
+        worker.join()
+        agent_manager.on_event = None
+
+        # Keep the full event log for the post-run "under the hood" trace.
+        st.session_state.agent_event_log = events
+        with feed_placeholder.container():
+            render_live_feed(events, running=False)
+
+        if "error" in run_outcome:
+            st.error(f"Analysis failed: {run_outcome['error']}")
+            return None
+
+        analysis_results = run_outcome.get("result")
+
         if not isinstance(analysis_results, dict):
             st.error("Analysis failed: no result was returned by the agent manager.")
             return None
@@ -692,16 +1007,27 @@ def render_analysis_results():
             st.info(f"**Enabled Analysis Areas:** {' • '.join(scope_details)}")
     
     # Create tabs for detailed results
-    tab2, tab3 = st.tabs([
+    tab2, tab3, tab4 = st.tabs([
         "📊 Executive Summary",
-        "📈 Performance Metrics"
+        "📈 Performance Metrics",
+        "🔬 Under the Hood"
     ])
-    
+
     with tab2:
         render_executive_summary(analysis)
-    
+
     with tab3:
         render_performance_metrics(analysis)
+
+    with tab4:
+        event_log = st.session_state.get("agent_event_log")
+        if event_log:
+            render_trace(event_log)
+        else:
+            st.info(
+                "No event trace is available for this analysis. "
+                "Run a new analysis to watch the agent workflow step by step."
+            )
 
 def render_performance_metrics(analysis):
     """Render performance metrics and charts"""
