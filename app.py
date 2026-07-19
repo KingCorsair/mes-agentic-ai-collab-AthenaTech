@@ -258,16 +258,38 @@ def _group_events(events):
     return run, timeline
 
 
-def _render_event_items(items, detail=False):
+def _render_sql_event(event):
+    payload = event.get("payload") or {}
+    if event.get("type") == "sql_failed":
+        st.warning(
+            f"🗄️ SQL failed: {payload.get('error')}\n\n"
+            f"`{_clip_text(payload.get('sql'), 200)}`"
+        )
+        return
+    st.code(payload.get("sql", ""), language="sql")
+    params = payload.get("params")
+    st.caption(
+        f"🗄️ params: {params or '—'} → {payload.get('row_count')} rows"
+        f" · {payload.get('execution_time_ms')} ms"
+    )
+
+
+def _render_event_items(items):
     """Render an activation's tool/SQL/guardrail events as feed lines.
 
     tool_started/tool_completed pairs (matched on tool_use_id) collapse
-    into a single line; SQL events emitted between them show below."""
+    into a single line. SQL events attach beneath the tool call that ran
+    them (matched on the tool_use_id the backend stamps into them), so
+    parallel tool calls can't interleave their queries; unstamped SQL
+    from older event logs falls back to rendering in arrival order."""
     completed_by_id = {}
+    sql_by_tool = {}
     for event in items:
+        payload = event.get("payload") or {}
         if event.get("type") == "tool_completed":
-            tool_id = (event.get("payload") or {}).get("tool_use_id")
-            completed_by_id.setdefault(tool_id, event)
+            completed_by_id.setdefault(payload.get("tool_use_id"), event)
+        elif event.get("type") in ("sql_executed", "sql_failed") and payload.get("tool_use_id"):
+            sql_by_tool.setdefault(payload["tool_use_id"], []).append(event)
 
     for event in items:
         etype = event.get("type")
@@ -275,7 +297,7 @@ def _render_event_items(items, detail=False):
 
         if etype == "tool_started":
             name = payload.get("tool_name")
-            args = _clip_text(payload.get("arguments"), 300 if detail else 110)
+            args = _clip_text(payload.get("arguments"), 300)
             done = completed_by_id.get(payload.get("tool_use_id"))
             if done is None:
                 st.markdown(f"🔧 `{name}({args})` — running…")
@@ -287,27 +309,14 @@ def _render_event_items(items, detail=False):
                     st.warning(f"🔧 `{name}({args})` failed: {done_payload.get('error')}")
                 else:
                     st.markdown(f"🔧 `{name}({args})`{duration_text}")
-                    if detail and done_payload.get("result_preview"):
-                        st.caption("Result preview:")
-                        st.code(done_payload["result_preview"], language=None)
+            for sql_event in sql_by_tool.get(payload.get("tool_use_id"), []):
+                _render_sql_event(sql_event)
         elif etype == "agent_message":
             text = payload.get("text", "")
-            if detail:
-                st.markdown("> " + text.replace("\n", "\n> "))
-            else:
-                st.markdown(f"💬 {_clip_text(text, 500)}")
-        elif etype == "sql_executed":
-            st.code(payload.get("sql", ""), language="sql")
-            params = payload.get("params")
-            st.caption(
-                f"🗄️ params: {params or '—'} → {payload.get('row_count')} rows"
-                f" · {payload.get('execution_time_ms')} ms"
-            )
-        elif etype == "sql_failed":
-            st.warning(
-                f"🗄️ SQL failed: {payload.get('error')}\n\n"
-                f"`{_clip_text(payload.get('sql'), 200)}`"
-            )
+            st.markdown("> " + text.replace("\n", "\n> "))
+        elif etype in ("sql_executed", "sql_failed"):
+            if not payload.get("tool_use_id"):
+                _render_sql_event(event)
         elif etype == "guardrail_triggered":
             st.warning(
                 f"🛡️ Guardrail **{payload.get('guardrail')}** blocked: "
@@ -396,48 +405,22 @@ def render_live_feed(events, running=True):
 
 
 def render_trace(events):
-    """Full post-run trace: every delegation prompt, tool call, SQL query
-    and result preview, one expander per agent activation."""
-    run, timeline = _group_events(events)
-
+    """Post-run replay of the run in exactly the live feed's format, so
+    the reader never has to learn a second layout. The PDF report and the
+    run folder's events.jsonl hold the full unabridged record."""
     st.caption(
-        "Every step the agent system took, in order. Prompts flow down from "
-        "the Supervisor to the subagents; each subagent chooses tools, the "
-        "tools run SQL against the MES database, and findings flow back up."
+        "Every step the agent system took, in order — the same view you "
+        "watched during the run. Prompts flow down from the Supervisor to "
+        "the subagents; each subagent's tools run SQL against the MES "
+        "database, and findings flow back up."
     )
 
+    run, _ = _group_events(events)
     if run["started"]:
         payload = run["started"]["payload"]
-        st.markdown(
-            f"**Run:** {payload.get('defect_type')} · last {payload.get('days_back')} days"
-            f" · scope: {payload.get('scope')} · id `{payload.get('run_id')}`"
-        )
+        st.markdown(f"**Run id:** `{payload.get('run_id')}`")
 
-    for kind, entry in timeline:
-        if kind == "supervisor":
-            with st.expander("🧠 Supervisor Agent — reasoning between delegations", expanded=True):
-                _render_event_items(entry["items"], detail=True)
-            continue
-
-        tool_calls = sum(1 for e in entry["items"] if e.get("type") == "tool_started")
-        status_text = {"completed": f"{entry['duration_s']}s", "failed": "FAILED",
-                       "running": "interrupted"}.get(entry["status"], "")
-        header = f"{_agent_label(entry['agent_name'])} — {tool_calls} tool call(s) · {status_text}"
-
-        with st.expander(header, expanded=True):
-            st.markdown("**Delegation prompt from the Supervisor:**")
-            st.code(entry["prompt"], language=None)
-            if entry["items"]:
-                st.markdown("**What the agent did:**")
-                _render_event_items(entry["items"], detail=True)
-            if entry["result_preview"]:
-                st.markdown("**Returned to the Supervisor:**")
-                st.code(entry["result_preview"], language=None)
-            if entry["error"]:
-                st.error(entry["error"])
-            footer = _metrics_caption(entry["metrics"])
-            if footer:
-                st.caption(footer)
+    render_live_feed(events, running=False)
 
     if run["completed"]:
         payload = run["completed"]["payload"]
@@ -738,6 +721,8 @@ def render_sidebar_configuration():
                 st.session_state.analysis_started = False
                 st.session_state.current_analysis = {}
                 st.session_state.selected_defect = None
+                st.session_state.show_final_analysis = False
+                st.session_state.agent_event_log = []
                 st.rerun()
         
         # PDF Reports section
@@ -917,6 +902,7 @@ def render_main_dashboard():
         if run_clicked and not st.session_state.analysis_running:
             st.session_state.analysis_running = True
             st.session_state.work_pending = True
+            st.session_state.show_final_analysis = False
             st.rerun()
 
         if st.session_state.analysis_running and st.session_state.get("work_pending"):
@@ -945,9 +931,22 @@ def render_main_dashboard():
 
     # Results render independently of the selectbox so a rerun where the
     # widget lost its selection (e.g. returning from the PDF viewer) doesn't
-    # wipe the completed analysis from view.
-    if st.session_state.analysis_started and st.session_state.current_analysis:
+    # wipe the completed analysis from view. After a run the finished live
+    # feed stays on screen (also for failed runs, whose error would
+    # otherwise be wiped by the rerun) until the reader asks for the
+    # final analysis — no jump-cut from feed to results.
+    finished_events = st.session_state.get("agent_event_log") or []
+    has_results = st.session_state.analysis_started and st.session_state.current_analysis
+    if has_results and st.session_state.get("show_final_analysis"):
         render_analysis_results()
+    elif finished_events and not st.session_state.get("analysis_running"):
+        st.subheader("🔍 Agent activity — completed run")
+        render_live_feed(finished_events, running=False)
+        if has_results and st.button(
+            "📊 Show final analysis", type="primary", use_container_width=True
+        ):
+            st.session_state.show_final_analysis = True
+            st.rerun()
     elif not selected_defect:
         # Show welcome message
         st.info("👈 Please select a defect type from the sidebar to begin analysis")
