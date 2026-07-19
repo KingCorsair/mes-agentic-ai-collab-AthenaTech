@@ -4,6 +4,7 @@ Contains Monitor, Analyzer, Planner, and Verifier agents for manufacturing quali
 """
 
 import re
+import contextvars
 import itertools
 import logging
 import os
@@ -213,6 +214,13 @@ def render_markdown_report_pdf(markdown_text, filename=None):
     return str(filepath.resolve())
 
 
+# The toolUseId of the tool call executing on the current context, so SQL
+# events can be attributed to the tool that ran them. A ContextVar (not a
+# thread-local) because the SDK may hop between async tasks and worker
+# threads between the tool hooks and the tool body; contextvars follow it.
+_ACTIVE_TOOL_USE_ID = contextvars.ContextVar("mes_active_tool_use_id", default=None)
+
+
 class _ObservabilityHooks(HookProvider):
     """Strands hook provider shared by all six agents.
 
@@ -257,6 +265,7 @@ class _ObservabilityHooks(HookProvider):
     def _before_tool(self, event):
         tool_use = event.tool_use or {}
         tool_use_id = tool_use.get("toolUseId")
+        _ACTIVE_TOOL_USE_ID.set(tool_use_id)
         self._tool_starts[tool_use_id] = time.time()
         self._manager._emit("tool_started", {
             "tool_name": tool_use.get("name"),
@@ -267,6 +276,7 @@ class _ObservabilityHooks(HookProvider):
     def _after_tool(self, event):
         tool_use = event.tool_use or {}
         tool_use_id = tool_use.get("toolUseId")
+        _ACTIVE_TOOL_USE_ID.set(None)
         started = self._tool_starts.pop(tool_use_id, None)
         payload = {
             "tool_name": tool_use.get("name"),
@@ -502,6 +512,7 @@ class MESAgentManager:
                 "params": self._preview(params, 200) if params else None,
                 "row_count": len(df),
                 "execution_time_ms": result["execution_time_ms"],
+                "tool_use_id": _ACTIVE_TOOL_USE_ID.get(),
             })
             return result
 
@@ -518,6 +529,7 @@ class MESAgentManager:
                 "params": self._preview(params, 200) if params else None,
                 "error": error_msg,
                 "execution_time_ms": error_result["execution_time_ms"],
+                "tool_use_id": _ACTIVE_TOOL_USE_ID.get(),
             })
             return error_result
     
