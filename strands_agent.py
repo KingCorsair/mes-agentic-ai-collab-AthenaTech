@@ -260,7 +260,7 @@ class _ObservabilityHooks(HookProvider):
         text = "\n\n".join(t for t in texts if t)
         if not text:
             return
-        self._manager._emit("agent_message", {"text": text[:4000]})
+        self._manager._emit("agent_message", {"text": text[:30000]})
 
     def _before_tool(self, event):
         tool_use = event.tool_use or {}
