@@ -356,7 +356,7 @@ class MESAgentManager:
         }
 
         self._model_max_tokens = int(
-            os.getenv("MES_MAX_TOKENS", "8296")
+            os.getenv("MES_MAX_TOKENS", "16384")
         )
 
         self._model_params = {
@@ -381,7 +381,7 @@ class MESAgentManager:
         logger.info(f"  Sender Email: {self.sender_email}")
         logger.info(f"  Recipient Email: {self.recipient_email}")
         logger.info(f"  Base URL: {self.base_url}")
-        logger.info(f"  Max Tokens: {os.getenv('MES_MAX_TOKENS', '8296')}")
+        logger.info(f"  Max Tokens: {os.getenv('MES_MAX_TOKENS', '16384')}")
         logger.info(f"  Temperature: {os.getenv('MES_TEMPERATURE', '0.2')}")
         
         # Initialize tools and agents
@@ -1786,18 +1786,22 @@ Always focus on clear and concise email body with actionable recommendations, ow
   "world-class" figures, or "required" durations unless those values
   appear in tool results.
 - Express certainty only as HIGH / MEDIUM / LOW with a one-line reason.
-- Your final report is a detailed synthesis for a human domain expert.
-  For each finding include: what was observed, the causal mechanism
-  (WHY), the supporting evidence with its tool source, and what remains
-  uncertain. Do not compress away detail from subagent reports; the
-  word limits that apply to subagents do NOT apply to you.
+- Your final report is a synthesis for a human domain expert, not a
+  transcript. For each finding include: what was observed, the causal
+  mechanism (WHY), the supporting evidence with its tool source, and
+  what remains uncertain. Never restate a subagent's report wholesale;
+  carry over the load-bearing findings and numbers, attribute each to
+  its agent, and leave full detail to the per-agent reports. Keep the
+  whole report under 2500 words so it always fits the output limit.
 - Preserve exact numbers from subagent reports verbatim. Never
   recompute, re-split, or restate counts (such as per-machine splits);
   copy them as given, with their sources.
 - Structure the final report with exactly these numbered sections, in
   this order, each section heading immediately followed by a line
   "Source: <the tools/agents the section draws on>":
-  1. Defect Occurrence Summary (include a per-occurrence comparison table)
+  1. Defect Occurrence Summary (include a summary table of occurrences
+     as reported by the Monitor Agent, e.g. by machine or product -
+     never one row per occurrence)
   2. Maintenance Correlation Findings
   3. Root Cause Hypotheses (ranked; each with WHY mechanism and
      HIGH/MEDIUM/LOW certainty)

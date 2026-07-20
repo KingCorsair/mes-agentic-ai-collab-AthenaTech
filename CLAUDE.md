@@ -112,7 +112,7 @@ All configuration is read from `.env` in the project root at import time.
 ## How to verify a change didn't break things
 
 Run one analysis (Battery Cell Variance, 7 days, Maintenance Correlation) and check:
-1. Startup log shows the intended `Model ID` and `Max Tokens: 8296`.
+1. Startup log shows the intended `Model ID` and `Max Tokens: 16384`.
 2. Each `call_*_agent` appears exactly once in the log (no retry loops).
 3. Zero `max_tokens stop reason` lines, zero `Query not in allowed list` warnings.
 4. `analyze_downtime_correlations` returns well under 1,000 rows.
