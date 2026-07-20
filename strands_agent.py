@@ -336,7 +336,7 @@ class MESAgentManager:
         # Email configuration from environment variables
         self.sender_email = os.getenv('MES_SENDER_EMAIL', 'operations.team@example.com')
         self.recipient_email = os.getenv('MES_RECIPIENT_EMAIL', 'operations.team@example.com')
-        self.base_url = os.getenv('MES_BASE_URL', 'https://df4n.cloudfront.net/proxy/8501')
+        self.base_url = os.getenv('MES_BASE_URL', 'http://localhost:8501')
         
         # Database path
         self.db_path = db_path
@@ -640,10 +640,22 @@ class MESAgentManager:
         @tool
         def send_email(subject: str, email_body: str, pdf_filename: str = None):
             """Send email for the short term action items with PDF link"""
+            # The app itself serves reports at ?pdf=<filename> (in-app PDF
+            # viewer), so the link works wherever MES_BASE_URL points at
+            # the running app. The tool owns link construction; agents are
+            # told never to invent URLs.
+            if pdf_filename:
+                pdf_link = f"{self.base_url}/?pdf={pdf_filename}"
+                email_body += f"\n\nDetailed PDF Report: {pdf_link}"
+
             if os.getenv("MES_EMAIL_DRY_RUN", "true").lower() == "true":
                 return {
                     "success": True,
-                    "message": "Dry run: email not sent",
+                    "dry_run": True,
+                    "message": ("DRY RUN - no email was actually sent to anyone. "
+                                "The draft below is a preview of what would have "
+                                "gone out. State this clearly when reporting "
+                                "notification status."),
                     "subject": subject,
                     "body": email_body,
                     "pdf_filename": pdf_filename,
@@ -651,7 +663,7 @@ class MESAgentManager:
 
             logger.info(f"Sending email with following detail: subject - {subject}")
             start_time = time.time()
-            
+
             # Create SES client using IAM role
             ses_client = boto3.client('ses', region_name=self.region_name)
 
@@ -659,12 +671,7 @@ class MESAgentManager:
             SENDER = self.sender_email
             RECIPIENT = self.recipient_email
             SUBJECT = subject
-            
-            # Add PDF link to email body if filename is provided
-            if pdf_filename:
-                pdf_link = f"{self.base_url}/pdf={pdf_filename}?pdf={pdf_filename}"
-                email_body += f"\n\nDetailed PDF Report: {pdf_link}"
-            
+
             # Email content
             BODY_TEXT = email_body
             BODY_HTML = f"""
@@ -1681,6 +1688,11 @@ Plan structure should include:
 2. **Short-term Actions** (1-3 months): Process improvements and training
 3. **Long-term Actions** (3-12 months): Strategic investments and upgrades
 
+Grounding rule: propose only actions that follow from findings actually
+present in the analysis you were given. Owners, departments, budgets, and
+resource-hour figures are not in the data - if you name one, mark it as a
+proposal requiring human assignment, never as an established fact.
+
 Always focus on measurable, actionable recommendations that improve manufacturing performance.""" + OUTPUT_RULES
         )
         
@@ -1746,7 +1758,15 @@ Email report should include:
 3. Provide summary of all the issues, findings, root cause analysis
 4. Detailed report attached as received from planner agent
 
-When sending email notifications, it is mandatory to pass the report filename provided in your task instructions, include it in the send_email_notification call to attach the PDF link in format(https://dfmw0zqekwl4n.cloudfront.net/proxy/8501/pdf=pdf_filename.pdf?pdf=pdf_filename.pdf) to the email.
+When sending email notifications, pass the report filename from your task
+instructions as pdf_filename in the send_email_notification call. The tool
+builds the report link itself - never construct, guess, or invent URLs.
+
+The email system may run in dry-run mode. Report the notification status
+exactly as the tool returns it: if the result says dry run, state plainly
+that no email was actually sent and the draft is a preview. Never claim
+delivery to recipients, or name recipients, that the tool result does not
+confirm.
 
 Always focus on clear and concise email body with actionable recommendations, ownership, timeline and risks if not done on time.""" + OUTPUT_RULES
         )
@@ -1864,7 +1884,7 @@ Always return a structured analysis result containing:
 - Defect type and analysis parameters including scope settings
 - Monitoring results with operational context within enabled scope
 - Root cause analysis with HIGH/MEDIUM/LOW certainty ratings for enabled areas
-- Action plans with timelines and resources for enabled scope
+- Action plans with timelines and resources where the data supports them
 - Verification results with validation status
 - Execution results with notification status
 - Executive summary with key findings and recommendations
@@ -2006,15 +2026,35 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
             # Create comprehensive prompt for supervisor agent
             final_report_filename = f"MES_Final_Report_{start_time.strftime('%Y%m%d_%H%M%S')}"
 
+            # Verified data context: without this, an empty window reads to
+            # the agents like a monitoring-infrastructure failure and they
+            # speculate; with it, emptiness has a stated, boring cause.
+            data_context = ""
+            try:
+                stats = self.get_defect_window_stats(defect_type, days_back)
+                if stats.get("success") and stats.get("rows"):
+                    row = stats["rows"][0]
+                    data_context = f"""
+            Data context (verified directly against the database just before this run):
+            - '{defect_type}' records inside the {days_back}-day window: {row.get('WindowCount')}
+            - Most recent '{defect_type}' record in the entire database: {row.get('LastOccurrence') or 'none'}
+            If the window holds zero records, the correct finding is that the
+            analysis window does not overlap the available data - report that
+            plainly. Do not conclude data-collection or infrastructure failure,
+            and correct any subagent that does.
+            """
+            except Exception as e:
+                logger.warning(f"Window stats pre-check failed: {e}")
+
             supervisor_prompt = f"""
             Execute comprehensive defect analysis workflow for defect type '{defect_type}' over the last {days_back} days.
-            
+
             Analysis Scope Configuration:
             - OEE Analysis: {'Enabled' if include_oee else 'Disabled'}
             - Downtime Analysis: {'Enabled' if include_downtime else 'Disabled'}
             - Changeover Analysis: {'Enabled' if include_changeover else 'Disabled'}
             - Maintenance Correlation: {'Enabled' if include_maintenance else 'Disabled'}
-            
+            {data_context}
             Execute the following workflow steps:
             
             1. **Monitor Phase**: Call Monitor Agent to capture operational data
@@ -2025,12 +2065,15 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
             2. **Analysis Phase**: Call Analyzer Agent for root cause analysis
                - Analyze monitoring data for {defect_type} root causes
                - Focus on enabled correlation areas: {scope_text}
-               - Provide statistical confidence and impact assessment
-            
+               - Rate the certainty of each hypothesis as HIGH/MEDIUM/LOW,
+                 grounded only in tool results
+
             3. **Planning Phase**: Call Planner Agent to create action plans
-               - Develop comprehensive improvement plans for {defect_type}
+               - Develop action plans grounded strictly in the analysis findings
                - Address enabled improvement areas: {scope_text}
                - Include immediate, short-term, and long-term actions
+               - Where the data contains no owners, budgets, or resource hours,
+                 do not demand them; invented specifics must not appear as facts
             
             4. **Verification Phase**: Call Verifier Agent to validate findings
                - Validate analysis results and action plans
@@ -2269,6 +2312,35 @@ PDF report:
         
         return self._execute_safe_query(sql_query, (cutoff_date,), purpose=(
             "List the distinct defect types recorded in the window."))
+
+    def get_defect_window_stats(self, defect_type, days_back):
+        """Pre-run check: how many records of this defect the selected
+        look-back window actually holds, and the newest record overall.
+        Lets the UI refuse to launch a run into a provably empty window,
+        and gives the Supervisor verified context so an empty result is
+        reported as 'window predates the data' instead of speculation."""
+        days_back = int(days_back)
+        if days_back < 0 or days_back > 3650:
+            raise ValueError("days_back must be between 0 and 3650")
+
+        cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+
+        sql_query = """
+        SELECT
+            COUNT(*) as WindowCount,
+            (SELECT MAX(qc2.Date)
+             FROM Defects d2
+             JOIN QualityControl qc2 ON d2.CheckID = qc2.CheckID
+             WHERE d2.DefectType = ?) as LastOccurrence
+        FROM Defects d
+        JOIN QualityControl qc ON d.CheckID = qc.CheckID
+        WHERE d.DefectType = ?
+            AND date(qc.Date) >= ?
+        """
+
+        return self._execute_safe_query(sql_query, (defect_type, defect_type, cutoff_date), purpose=(
+            "Count this defect's records inside the selected look-back window "
+            "and find its most recent occurrence in the whole database."))
 
     def get_defect_preview(self, defect_type):
         """Execute SQL query directly without going through agent"""

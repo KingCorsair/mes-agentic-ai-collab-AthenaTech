@@ -653,11 +653,44 @@ def run_defect_analysis(defect_type: str, days_back: int = 7, include_oee: bool 
         logger.error(f"Analysis error: {e}")
         return None
 
+def check_analysis_window(defect_type: str, days_back: int):
+    """Pre-run check: refuse to launch the agents into a window that
+    provably holds no records for this defect. Returns (ok, warning_text).
+    Fails open — a broken pre-check must never block a run."""
+    try:
+        agent_manager = get_agent_manager()
+        if agent_manager is None:
+            return True, ""
+        result = agent_manager.get_defect_window_stats(defect_type, days_back)
+        if not result.get("success") or not result.get("rows"):
+            return True, ""
+        row = result["rows"][0]
+        if (row.get("WindowCount") or 0) > 0:
+            return True, ""
+        last = row.get("LastOccurrence")
+        if last:
+            last_date = pd.to_datetime(last)
+            age_days = (datetime.now() - last_date).days
+            return False, (
+                f"⏳ No **{defect_type}** records exist in the last {days_back} days — "
+                f"the most recent is from **{last_date.strftime('%Y-%m-%d')}** "
+                f"({age_days} days ago). Widen the look-back period to at least "
+                f"{age_days + 1} days, then press Run Analysis again."
+            )
+        return False, (
+            f"⏳ No **{defect_type}** records exist anywhere in the database, "
+            f"so an analysis would have nothing to work with."
+        )
+    except Exception as e:
+        logger.warning(f"Analysis window pre-check failed: {e}")
+        return True, ""
+
+
 def render_defect_selection():
     """Render defect type selection interface in sidebar"""
     
     st.sidebar.subheader("🎯 Incident Simulation")
-    st.sidebar.info("Sends Event (Drop in OEE, Line stoppage, Downtime due to tool changeover)")
+    st.sidebar.info("Pick a defect type to simulate a detected incident. The Run Analysis button starts the agent workflow for it.")
     
     # Load defect types
     with st.sidebar:
@@ -714,17 +747,23 @@ def render_defect_preview(defect_type: str):
         
         if result and result.get('rows') and len(result['rows']) > 0:
             data = result['rows'][0]
-            
+
+            # The preview query counts a fixed 30-day window; the analysis
+            # uses the sidebar's look-back. Label the window so the two
+            # never look contradictory (e.g. 412 here vs 0 in a 7-day run).
+            st.caption("All numbers below cover the last 30 days of records.")
+
             col1, col2, col3 = st.columns(3)
-            
+
             with col1:
                 st.metric("Total Occurrences", f"{data.get('TotalOccurrences', 0):,}")
                 st.metric("Machines Affected", f"{data.get('MachinesAffected', 0):,}")
-            
+
             with col2:
                 severity = data.get('AvgSeverity') or 0
+                severity_word = "High" if severity > 3 else "Medium" if severity > 2 else "Low"
                 severity_color = "🔴" if severity > 3 else "🟡" if severity > 2 else "🟢"
-                st.metric("Avg Severity", f"{severity_color} {severity:.1f}/5")
+                st.metric("Avg Severity", f"{severity_color} {severity:.1f}/5 ({severity_word})")
                 st.metric("Products Affected", f"{data.get('ProductsAffected', 0):,}")
             
             with col3:
@@ -772,7 +811,7 @@ def render_sidebar_configuration():
     with st.sidebar:
         st.divider()
         
-        st.subheader("⚙️ Reasoning Configuration")
+        st.subheader("⚙️ Analysis Configuration")
         
         # Time period selection
         time_option = st.selectbox(
@@ -784,7 +823,7 @@ def render_sidebar_configuration():
         days_back = int(time_option.split()[1])
         
         # Analysis scope
-        st.subheader("🔍 Reasoning Scope")
+        st.subheader("🔍 Analysis Scope")
         include_oee = st.checkbox("OEE Performance Analysis", value=False, disabled=st.session_state.analysis_running)
         include_downtime = st.checkbox("Downtime & Stoppages", value=False, disabled=st.session_state.analysis_running)
         include_changeover = st.checkbox("Batch Changeover Analysis", value=False, disabled=st.session_state.analysis_running)
@@ -808,7 +847,8 @@ def render_sidebar_configuration():
         
         available_reports = get_available_reports()
         if available_reports:
-            st.write(f"Found {len(available_reports)} report(s)")
+            count = len(available_reports)
+            st.write(f"Found {count} report" + ("s" if count != 1 else ""))
             
             for report_file in available_reports[:5]:  # Show last 5 reports
                 file_name = report_file.name
@@ -876,63 +916,63 @@ def render_main_dashboard():
         return
     
     # Agent workflow overview
+    # Same names and icons as the live feed uses, so the map at the top
+    # matches the territory the class watches below.
     st.subheader("🤖 AI Agent Workflow")
     st.error("""
-                           **🔍 Supervisor Agent** - Continuous monitoring
+                           **🧠 Supervisor Agent** - Continuous monitoring
 & Feedback
-        
+
         """)
     col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
         st.info("""
-        **🔍 Context Builder Agent**
-        
+        **📡 Monitor Agent**
+
         • Captures OEE drops
-        • Fetches context data  
+        • Fetches context data
         • Historical patterns
         • Operator logs
         • Work order analysis
         """)
-    
+
     with col2:
         st.warning("""
-        **🎯 Analyzer Agent**
-        
+        **🔬 Analyzer Agent**
+
         • Root cause identification
         • Correlation analysis
         • Performance reasoning
-        • Statistical confidence
-        • Impact quantification
+        • Certainty ratings (HIGH/MEDIUM/LOW)
         """)
-    
+
     with col3:
         st.success("""
         **📋 Planner Agent**
-        
+
         • Actionable plans
         • PDF report creation
-        • Resource estimation
         • Implementation roadmap
         • Success metrics
         """)
-    
+
     with col4:
         st.error("""
         **✅ Verifier Agent**
-        
+
         • Finding validation
         • Quality assurance
         """)
     with col5:
         st.info("""
-        **✅ Executor Agent**
-        
+        **📧 Executor Agent**
 
-        • Email notifications
+
+        • Email notification (dry run)
         • Human review
 
-        """)    
+        """)
     
     st.divider()
     
@@ -977,10 +1017,17 @@ def render_main_dashboard():
         )
 
         if run_clicked and not st.session_state.analysis_running:
-            st.session_state.analysis_running = True
-            st.session_state.work_pending = True
-            st.session_state.show_final_analysis = False
-            st.rerun()
+            # One cheap COUNT query before committing five agents and
+            # minutes of wall-clock to a window that holds no data.
+            window_ok, window_warning = check_analysis_window(
+                selected_defect, config['days_back'])
+            if not window_ok:
+                st.warning(window_warning)
+            else:
+                st.session_state.analysis_running = True
+                st.session_state.work_pending = True
+                st.session_state.show_final_analysis = False
+                st.rerun()
 
         if st.session_state.analysis_running and st.session_state.get("work_pending"):
             st.session_state.work_pending = False
