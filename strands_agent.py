@@ -270,7 +270,7 @@ class _ObservabilityHooks(HookProvider):
         self._manager._emit("tool_started", {
             "tool_name": tool_use.get("name"),
             "tool_use_id": tool_use_id,
-            "arguments": self._manager._preview(tool_use.get("input"), 300),
+            "arguments": self._manager._preview(tool_use.get("input"), 4000),
         })
 
     def _after_tool(self, event):
@@ -508,7 +508,7 @@ class MESAgentManager:
 
             logger.info(f"Query executed successfully: {len(df)} rows returned")
             self._emit("sql_executed", {
-                "sql": self._preview(query, 600),
+                "sql": self._preview(query, 4000),
                 "params": self._preview(params, 200) if params else None,
                 "row_count": len(df),
                 "execution_time_ms": result["execution_time_ms"],
@@ -525,7 +525,7 @@ class MESAgentManager:
                 "execution_time_ms": round((time.time() - start_time) * 1000, 2)
             }
             self._emit("sql_failed", {
-                "sql": self._preview(query, 600),
+                "sql": self._preview(query, 4000),
                 "params": self._preview(params, 200) if params else None,
                 "error": error_msg,
                 "execution_time_ms": error_result["execution_time_ms"],
@@ -591,7 +591,7 @@ class MESAgentManager:
                 logger.warning(f"Query not in allowed list: {sql_query}")
                 self._emit("guardrail_triggered", {
                     "guardrail": "sql_allowlist",
-                    "attempted_query": self._preview(sql_query, 400),
+                    "attempted_query": self._preview(sql_query, 4000),
                     "outcome": "rejected - only predefined safe queries are allowed",
                 })
                 return {

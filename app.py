@@ -192,11 +192,6 @@ def _agent_label(agent_name):
     return AGENT_LABELS.get(agent_name, f"🤖 {agent_name}")
 
 
-def _clip_text(text, limit):
-    text = " ".join(str(text or "").split())
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
 def _group_events(events):
     """Fold the flat event list into a run header plus a chronological
     timeline of subagent activations and, between them, the Supervisor's
@@ -261,12 +256,10 @@ def _group_events(events):
 def _render_sql_event(event):
     payload = event.get("payload") or {}
     if event.get("type") == "sql_failed":
-        st.warning(
-            f"🗄️ SQL failed: {payload.get('error')}\n\n"
-            f"`{_clip_text(payload.get('sql'), 200)}`"
-        )
+        st.warning(f"🗄️ SQL failed: {payload.get('error')}")
+        st.code(payload.get("sql", ""), language="sql", wrap_lines=True)
         return
-    st.code(payload.get("sql", ""), language="sql")
+    st.code(payload.get("sql", ""), language="sql", wrap_lines=True)
     params = payload.get("params")
     st.caption(
         f"🗄️ params: {params or '—'} → {payload.get('row_count')} rows"
@@ -297,18 +290,24 @@ def _render_event_items(items):
 
         if etype == "tool_started":
             name = payload.get("tool_name")
-            args = _clip_text(payload.get("arguments"), 300)
+            # Short arguments read fine inline; long ones (agent-written
+            # handoff text) go in their own wrapped block below the call
+            # line so nothing gets cut off mid-word.
+            args = " ".join(str(payload.get("arguments") or "").split())
+            inline_args = args if len(args) <= 200 else "…"
             done = completed_by_id.get(payload.get("tool_use_id"))
             if done is None:
-                st.markdown(f"🔧 `{name}({args})` — running…")
+                st.markdown(f"🔧 `{name}({inline_args})` — running…")
             else:
                 done_payload = done.get("payload") or {}
                 duration = done_payload.get("duration_ms")
                 duration_text = f" · {duration} ms" if duration is not None else ""
                 if done_payload.get("status") == "error":
-                    st.warning(f"🔧 `{name}({args})` failed: {done_payload.get('error')}")
+                    st.warning(f"🔧 `{name}({inline_args})` failed: {done_payload.get('error')}")
                 else:
-                    st.markdown(f"🔧 `{name}({args})`{duration_text}")
+                    st.markdown(f"🔧 `{name}({inline_args})`{duration_text}")
+            if inline_args != args:
+                st.code(args, language=None, wrap_lines=True)
             for sql_event in sql_by_tool.get(payload.get("tool_use_id"), []):
                 _render_sql_event(sql_event)
         elif etype == "agent_message":
@@ -319,9 +318,10 @@ def _render_event_items(items):
                 _render_sql_event(event)
         elif etype == "guardrail_triggered":
             st.warning(
-                f"🛡️ Guardrail **{payload.get('guardrail')}** blocked: "
-                f"`{_clip_text(payload.get('attempted_query'), 200)}` — {payload.get('outcome')}"
+                f"🛡️ Guardrail **{payload.get('guardrail')}** blocked a query — "
+                f"{payload.get('outcome')}"
             )
+            st.code(payload.get("attempted_query", ""), language="sql", wrap_lines=True)
         elif etype == "agent_retry":
             st.warning(
                 f"🔁 Attempt {payload.get('attempt')} failed, retrying: {payload.get('error')}"
@@ -381,7 +381,7 @@ def render_live_feed(events, running=True):
         # Stay expanded after completion so the class can review each
         # agent's steps without re-opening every box.
         with st.status(label, state=state, expanded=True):
-            st.caption(f"Task from Supervisor: {_clip_text(entry['prompt'], 220)}")
+            st.caption(f"Task from Supervisor: {' '.join(str(entry['prompt']).split())}")
             _render_event_items(entry["items"])
             if entry["error"]:
                 st.error(entry["error"])
