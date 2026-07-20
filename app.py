@@ -262,7 +262,7 @@ def _render_sql_event(event):
     payload = event.get("payload") or {}
     purpose = payload.get("purpose")
     if purpose:
-        st.markdown(f"🗄️ The tool asked the MES database: *“{purpose}”* — as this SQL query:")
+        st.caption(f"🗄️ The tool asked the MES database: “{purpose}” — as this SQL query:")
     if event.get("type") == "sql_failed":
         st.warning(f"🗄️ SQL failed: {payload.get('error')}")
         st.code(payload.get("sql", ""), language="sql", wrap_lines=True)
@@ -328,9 +328,9 @@ def _render_event_items(items):
                 else:
                     st.markdown(f"🔧 `{name}({inline_args})`{duration_text}")
             for key, text in long_texts.items():
-                st.markdown(
-                    f"📝 *The {_plain_agent_name(event.get('agent'))} wrote this "
-                    f"text and passed it to the tool as* `{key}`:"
+                st.caption(
+                    f"📝 The {_plain_agent_name(event.get('agent'))} wrote this "
+                    f"text and passed it to the tool as `{key}`:"
                 )
                 st.markdown("> " + text.replace("\n", "\n> "))
             for sql_event in sql_by_tool.get(payload.get("tool_use_id"), []):
@@ -367,8 +367,18 @@ def _metrics_caption(metrics):
 
 
 def render_live_feed(events, running=True):
-    """Redrawable live view of the run so far (call inside a fresh container)."""
+    """Redrawable live view of the run so far (call inside a fresh container).
+
+    Two visual registers, kept strict so the class can tell them apart:
+    small gray captions are the app narrating; quote blocks and code
+    boxes are the actual text/SQL the agents and database exchanged."""
     run, timeline = _group_events(events)
+
+    st.caption(
+        "ℹ️ How to read this feed: gray notes like this one are the app "
+        "explaining what is happening. Quoted blocks and code boxes are the "
+        "actual messages the agents and the database sent each other."
+    )
 
     if run["started"]:
         payload = run["started"]["payload"]
@@ -406,7 +416,13 @@ def render_live_feed(events, running=True):
         # Stay expanded after completion so the class can review each
         # agent's steps without re-opening every box.
         with st.status(label, state=state, expanded=True):
-            st.caption(f"Task from Supervisor: {' '.join(str(entry['prompt']).split())}")
+            prompt = str(entry["prompt"] or "").strip()
+            if prompt:
+                st.caption(
+                    f"📨 The Supervisor wrote this task briefing and handed it "
+                    f"to the {_plain_agent_name(entry['agent_name'])}:"
+                )
+                st.markdown("> " + prompt.replace("\n", "\n> "))
             _render_event_items(entry["items"])
             if entry["error"]:
                 st.error(entry["error"])
