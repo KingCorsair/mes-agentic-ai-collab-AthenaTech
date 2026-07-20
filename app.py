@@ -44,6 +44,33 @@ if 'analysis_running' not in st.session_state:
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Human review decisions for reports, keyed by PDF filename. Lives next
+# to the PDFs it describes (mes.db stays read-only).
+DECISIONS_FILE = REPORTS_DIR / "report_decisions.json"
+
+
+def load_report_decisions():
+    """Recorded approve/reject decisions per report filename."""
+    try:
+        if DECISIONS_FILE.exists():
+            return json.loads(DECISIONS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"Could not read report decisions: {e}")
+    return {}
+
+
+def record_report_decision(pdf_filename: str, decision: str):
+    """Persist a human review decision for a report."""
+    decisions = load_report_decisions()
+    decisions[pdf_filename] = {
+        "decision": decision,
+        "at": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        DECISIONS_FILE.write_text(json.dumps(decisions, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Could not record report decision: {e}")
+
 # JSON serialization helper
 def datetime_to_string(obj):
     """Convert datetime objects to string for JSON serialization"""
@@ -71,9 +98,32 @@ def serialize_analysis_results(results):
 
 # Initialize agent manager with caching
 
+def _detect_app_base_url():
+    """Best-effort public URL of this app from the current request, so
+    emailed report links work for viewers other than the host machine."""
+    try:
+        headers = st.context.headers
+        host = headers.get("Host")
+        if not host:
+            return None
+        proto = headers.get("X-Forwarded-Proto")
+        if not proto:
+            proto = "http" if host.split(":")[0] in ("localhost", "127.0.0.1") else "https"
+        return f"{proto}://{host}"
+    except Exception:
+        return None
+
+
 def get_agent_manager():
     """Initialize and cache the MES Agent Manager"""
     try:
+        # Explicit MES_BASE_URL config wins; otherwise point report links
+        # at the address this app is actually being served from, so they
+        # work on Streamlit Cloud without a manually configured secret.
+        if not os.getenv("MES_BASE_URL"):
+            detected = _detect_app_base_url()
+            if detected:
+                os.environ["MES_BASE_URL"] = detected
         manager = MESAgentManager()
 
         return manager
@@ -861,12 +911,12 @@ def render_sidebar_configuration():
             count = len(available_reports)
             st.write(f"Found {count} report" + ("s" if count != 1 else ""))
             
+            decisions = load_report_decisions()
             for report_file in available_reports[:5]:  # Show last 5 reports
                 file_name = report_file.name
-                file_size = report_file.stat().st_size
-                file_date = datetime.fromtimestamp(report_file.stat().st_mtime)
-
-                if st.button(f"{file_name}", key=f"url_{file_name}"):
+                verdict = decisions.get(file_name, {}).get("decision")
+                badge = "✅ " if verdict == "approved" else "❌ " if verdict == "rejected" else ""
+                if st.button(f"{badge}{file_name}", key=f"url_{file_name}"):
                     # Update URL parameters to show this PDF
                     st.query_params["pdf"] = file_name
                     st.rerun()
@@ -898,21 +948,27 @@ def render_main_dashboard():
     url_pdf = get_pdf_from_url()
     if url_pdf:
         st.subheader(f"📄 Shared PDF Report: {url_pdf.name}")
-        
-        col1, col2, col3 = st.columns([2,2, 1])
+
+        # Human-in-the-loop review: decisions are recorded per report and
+        # shown here and in the sidebar list, so the buttons do something
+        # real instead of silently closing the viewer.
+        decision = load_report_decisions().get(url_pdf.name)
+        if decision:
+            verdict = "approved ✅" if decision.get("decision") == "approved" else "rejected ❌"
+            st.info(f"Human review: this plan was **{verdict}** on {decision.get('at')}.")
+
+        col1, col2, col3 = st.columns([2, 2, 1])
         with col1:
-            if st.button("Approve plan"):
-                # todo take action
-                st.query_params.clear()
+            if st.button("✅ Approve plan"):
+                record_report_decision(url_pdf.name, "approved")
                 st.rerun()
         with col2:
-            if st.button("Reject plan"):
-                # todo take action
-                st.query_params.clear()
-                st.rerun()        
+            if st.button("❌ Reject plan"):
+                record_report_decision(url_pdf.name, "rejected")
+                st.rerun()
 
         with col3:
-            if st.button("❌ Close PDF View"):
+            if st.button("✖ Close view"):
                 # Clear URL parameters
                 st.query_params.clear()
                 st.rerun()
