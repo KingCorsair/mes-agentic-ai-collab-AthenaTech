@@ -15,7 +15,6 @@ import queue
 import threading
 import time
 from pathlib import Path
-import base64
 import urllib.parse
 
 # # Add parent directory to path for imports
@@ -205,15 +204,25 @@ def generate_pdf_url(pdf_filename):
         return f"?pdf={encoded_filename}"
 
 def display_pdf_viewer(pdf_path):
-    """Display PDF in Streamlit using base64 encoding"""
+    """Display a PDF inline using Streamlit's native PDF renderer.
+
+    The old approach embedded the PDF as a data: base64 URI inside an
+    <iframe>; current Chrome blocks rendering PDFs from data-URI iframes
+    for security, showing 'not allowed to display'. st.pdf renders the
+    bytes directly without that restriction. Returns the bytes so the
+    caller can still offer a download button."""
     try:
         with open(pdf_path, "rb") as f:
             pdf_data = f.read()
-        
-        base64_pdf = base64.b64encode(pdf_data).decode('utf-8')
-        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
-        st.markdown(pdf_display, unsafe_allow_html=True)
-        
+
+        try:
+            st.pdf(pdf_data, height=800)
+        except Exception as render_err:
+            # Very old Streamlit without st.pdf, or a render hiccup: fall
+            # back to a clear message rather than a blank/blocked frame.
+            logger.warning(f"st.pdf failed, offering download only: {render_err}")
+            st.info("Inline preview unavailable here — use the download button below to open the report.")
+
         return pdf_data
     except Exception as e:
         st.error(f"Error displaying PDF: {e}")
