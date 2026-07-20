@@ -503,11 +503,15 @@ class MESAgentManager:
 
     def _cutoff_date(self, days_back) -> str:
         """Start date of a look-back window, counted back from the data
-        anchor (newest database record) rather than from today."""
+        anchor (newest database record) rather than from today.
+
+        "Last N days" means N calendar dates ending at the anchor date
+        inclusive, so the subtraction is days_back - 1 (a plain -days_back
+        yields N+1 dates, an off-by-one readers notice in the UI)."""
         days_back = int(days_back)
         if days_back < 0 or days_back > 3650:
             raise ValueError("days_back must be between 0 and 3650")
-        return (self.data_anchor_date - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        return (self.data_anchor_date - timedelta(days=max(days_back - 1, 0))).strftime('%Y-%m-%d')
     
     def _validate_table_name(self, table_name: str) -> bool:
         """Validate table name against allowed list"""
@@ -662,7 +666,10 @@ class MESAgentManager:
                 })
                 return {
                     "success": False,
-                    "error": "Only predefined safe queries are allowed for security reasons"
+                    "error": ("Only predefined safe queries are allowed for security "
+                              "reasons. The data this query would have returned is "
+                              "unavailable - report it as 'not available in data'; "
+                              "never estimate or approximate what it would have shown.")
                 }
         
         self.execute_sql_tool = execute_sql
@@ -866,7 +873,9 @@ class MESAgentManager:
 
         @tool
         def fetch_downtime_events(days_back: int = 7):
-            """Fetch downtime events and line stoppages"""
+            """Fetch individual downtime events and line stoppages, longest
+            first, capped at 300 rows. For totals use the aggregate tools;
+            never count these rows yourself."""
             # Validate input
             days_back = int(days_back)
             if days_back < 0 or days_back > 3650:
@@ -907,16 +916,19 @@ class MESAgentManager:
                 date(dt.StartTime) >= ?
             ORDER BY 
                 dt.Duration DESC, dt.StartTime DESC
+            LIMIT 300
             """
 
             return self._execute_safe_query(query, (cutoff_date,), purpose=(
-                "List every machine stoppage in the window with its reason and "
-                "duration, plus whichever work order, product and operator were "
-                "running at the time."))
+                "List the window's machine stoppages (longest first, capped at "
+                "300) with reason and duration, plus whichever work order, "
+                "product and operator were running at the time."))
 
         @tool
         def fetch_historical_patterns(days_back: int = 7):
-            """Fetch historical stoppage patterns and context"""
+            """Fetch historical stoppage patterns (grouped counts by date,
+            weekday, hour and reason), most frequent first, capped at 300
+            rows."""
             # Validate input
             days_back = int(days_back)
             if days_back < 0 or days_back > 3650:
@@ -955,6 +967,7 @@ class MESAgentManager:
                 date(dt.StartTime), dt.Reason, m.Type, wc.Name, s.Name
             ORDER BY 
                 EventCount DESC, AvgDuration DESC
+            LIMIT 300
             """
 
             return self._execute_safe_query(query, (cutoff_date,), purpose=(
@@ -963,7 +976,9 @@ class MESAgentManager:
 
         @tool
         def fetch_work_orders_context(days_back: int = 7):
-            """Fetch work orders context and batch reports"""
+            """Fetch individual work orders with planned vs actual
+            production, newest first, capped at 300 rows. For totals use
+            the aggregate tools; never count these rows yourself."""
             # Validate input
             days_back = int(days_back)
             if days_back < 0 or days_back > 3650:
@@ -1006,15 +1021,18 @@ class MESAgentManager:
                 date(wo.ActualStartTime) >= ?
             ORDER BY
                 wo.ActualStartTime DESC
+            LIMIT 300
             """
 
             return self._execute_safe_query(query, (cutoff_date,), purpose=(
-                "List the window's work orders with planned versus actual "
-                "production, scrap and completion rate."))
+                "List the window's work orders (newest first, capped at 300) "
+                "with planned versus actual production, scrap and completion "
+                "rate."))
 
         @tool
         def fetch_operator_logs(days_back: int = 7):
-            """Fetch operator logs and shift performance"""
+            """Fetch per-operator daily shift performance summaries, newest
+            first, capped at 300 rows."""
             # Validate input
             days_back = int(days_back)
             if days_back < 0 or days_back > 3650:
@@ -1050,11 +1068,76 @@ class MESAgentManager:
                 date(wo.ActualStartTime), e.EmployeeID, s.ShiftID, wc.WorkCenterID
             ORDER BY 
                 wo.ActualStartTime DESC
+            LIMIT 300
             """
 
             return self._execute_safe_query(query, (cutoff_date,), purpose=(
                 "Summarize each operator's daily shift performance — orders "
-                "handled, average completion rate and total scrap."))
+                "handled, average completion rate and total scrap (newest "
+                "first, capped at 300 rows)."))
+
+        @tool
+        def summarize_defect_distribution(defect_type: str, days_back: int = 7):
+            """The ONLY sanctioned source for counts of one defect type.
+            Returns SQL-computed totals of defect records and affected
+            units (SUM of the Quantity column) grouped by machine, shift,
+            calendar date, recorded root cause, and severity - one row per
+            (Dimension, Item). Cite these numbers verbatim; never count
+            raw rows from other tools yourself."""
+            days_back = int(days_back)
+            if days_back < 0 or days_back > 3650:
+                raise ValueError("days_back must be between 0 and 3650")
+
+            cutoff_date = self._cutoff_date(days_back)
+
+            query = """
+            SELECT 'ByMachine' as Dimension, m.Name as Item,
+                COUNT(*) as DefectRecords, SUM(d.Quantity) as UnitsAffected
+            FROM Defects d
+            JOIN QualityControl qc ON d.CheckID = qc.CheckID
+            JOIN WorkOrders wo ON qc.OrderID = wo.OrderID
+            JOIN Machines m ON wo.MachineID = m.MachineID
+            WHERE d.DefectType = ? AND date(qc.Date) >= ?
+            GROUP BY m.MachineID
+            UNION ALL
+            SELECT 'ByShift', s.Name, COUNT(*), SUM(d.Quantity)
+            FROM Defects d
+            JOIN QualityControl qc ON d.CheckID = qc.CheckID
+            JOIN WorkOrders wo ON qc.OrderID = wo.OrderID
+            JOIN Employees e ON wo.EmployeeID = e.EmployeeID
+            JOIN Shifts s ON e.ShiftID = s.ShiftID
+            WHERE d.DefectType = ? AND date(qc.Date) >= ?
+            GROUP BY s.ShiftID
+            UNION ALL
+            SELECT 'ByDate', date(qc.Date), COUNT(*), SUM(d.Quantity)
+            FROM Defects d
+            JOIN QualityControl qc ON d.CheckID = qc.CheckID
+            WHERE d.DefectType = ? AND date(qc.Date) >= ?
+            GROUP BY date(qc.Date)
+            UNION ALL
+            SELECT 'ByRootCause', d.RootCause, COUNT(*), SUM(d.Quantity)
+            FROM Defects d
+            JOIN QualityControl qc ON d.CheckID = qc.CheckID
+            WHERE d.DefectType = ? AND date(qc.Date) >= ?
+            GROUP BY d.RootCause
+            UNION ALL
+            SELECT 'BySeverity', 'Severity ' || d.Severity, COUNT(*), SUM(d.Quantity)
+            FROM Defects d
+            JOIN QualityControl qc ON d.CheckID = qc.CheckID
+            WHERE d.DefectType = ? AND date(qc.Date) >= ?
+            GROUP BY d.Severity
+            ORDER BY Dimension, DefectRecords DESC
+            LIMIT 200
+            """
+
+            params = (defect_type, cutoff_date) * 5
+            return self._execute_safe_query(query, params, purpose=(
+                f"Count '{defect_type}' defect records and affected units by "
+                "machine, shift, calendar date, recorded root cause, and "
+                "severity - the sanctioned source for every count."))
+
+        # Shared with the Analyzer so both agents cite the same counts.
+        self._summarize_defect_distribution_tool = summarize_defect_distribution
 
         self.monitor_tools = [
             fetch_oee_metrics,
@@ -1062,7 +1145,8 @@ class MESAgentManager:
             fetch_historical_patterns,
             fetch_work_orders_context,
             fetch_operator_logs,
-            fetch_defect_records          
+            fetch_defect_records,
+            summarize_defect_distribution
         ]
         
 
@@ -1112,11 +1196,13 @@ class MESAgentManager:
                 dt.Reason, s.Name, e.Name, p.Name, m.Type
             ORDER BY 
                 TotalDuration DESC
+            LIMIT 500
             """
 
             return self._execute_safe_query(query, (cutoff_date,), purpose=(
                 "Group downtime by reason, shift, operator, product and machine "
-                "type to show which combinations lose the most production time."))
+                "type to show which combinations lose the most production time "
+                "(top 500 by total duration)."))
 
         @tool
         def analyze_batch_changeover_time(days_back: int = 7):
@@ -1317,11 +1403,65 @@ class MESAgentManager:
                 "Count defects of every type by recorded root cause, product, "
                 "machine, operator and shift, with average defect and yield rates."))
 
+        @tool
+        def correlate_defects_with_maintenance(defect_type: str, days_back: int = 7):
+            """Directly match each recorded defect of ONE type to the
+            downtime events (maintenance appears as Reason values) that
+            ended on the SAME machine within the 72 hours before the
+            defect's quality check. Returns one row per defect-downtime
+            pair with machine, reason, both timestamps, and the gap in
+            hours. Use this for maintenance-defect correlation instead of
+            eyeballing separate defect and downtime lists - it is the only
+            tool that enforces same-machine, time-ordered matching."""
+            days_back = int(days_back)
+            if days_back < 0 or days_back > 3650:
+                raise ValueError("days_back must be between 0 and 3650")
+
+            cutoff_date = self._cutoff_date(days_back)
+
+            query = """
+            SELECT
+                qc.Date as DefectTime,
+                d.DefectType,
+                d.Severity,
+                m.Name as MachineName,
+                m.Type as MachineType,
+                dt.Reason as DowntimeReason,
+                dt.StartTime as DowntimeStart,
+                dt.EndTime as DowntimeEnd,
+                ROUND((julianday(qc.Date) - julianday(dt.EndTime)) * 24, 1) as HoursBeforeDefect
+            FROM
+                Defects d
+            JOIN
+                QualityControl qc ON d.CheckID = qc.CheckID
+            JOIN
+                WorkOrders wo ON qc.OrderID = wo.OrderID
+            JOIN
+                Machines m ON wo.MachineID = m.MachineID
+            JOIN
+                Downtimes dt ON dt.MachineID = wo.MachineID
+                AND dt.EndTime <= qc.Date
+                AND dt.EndTime >= datetime(qc.Date, '-72 hours')
+            WHERE
+                d.DefectType = ?
+                AND date(qc.Date) >= ?
+            ORDER BY
+                qc.Date DESC, HoursBeforeDefect ASC
+            LIMIT 500
+            """
+
+            return self._execute_safe_query(query, (defect_type, cutoff_date), purpose=(
+                f"For each '{defect_type}' defect, list the downtime events "
+                "(maintenance included) that ended on the same machine within "
+                "the 72 hours before the defect was found, with the gap in hours."))
+
         self.analyzer_tools = [
             analyze_downtime_correlations,
             analyze_batch_changeover_time,
             identify_performance_patterns,
-            analyze_quality_defects
+            analyze_quality_defects,
+            correlate_defects_with_maintenance,
+            self._summarize_defect_distribution_tool
         ]
 
     def _init_planner_tools(self):
@@ -1657,6 +1797,23 @@ class MESAgentManager:
   named person, and never recommend action against an individual;
   recommend reviewing procedures, work instructions, or conditions
   instead.
+- Never count, sum, or take percentages over raw rows yourself - that
+  includes counting how many rows share a machine, shift, date, or
+  cause. Cite counts only from tool columns that contain them
+  (DefectRecords, DefectCount, EventCount, ...); for per-machine,
+  per-shift, per-date, per-cause, or severity totals of a defect, use
+  summarize_defect_distribution. A grouped result's ROW COUNT is not a
+  record count - never present it as one.
+- If a tool call fails or a query is rejected by the guardrail, that
+  data is unavailable: write "not available in data". Never estimate,
+  extrapolate, or approximate what the blocked query would have
+  returned, and never forecast future counts ("may exceed N by date").
+- Machines are known only by their recorded Name, Type, and work
+  center. Never describe what a machine physically does or which
+  process step it performs beyond those fields; if a defect appears on
+  a machine whose type seems unrelated, state the association plainly
+  ("the synthetic data links this machine to this defect") without
+  inventing an explanation.
 """
 
         """Initialize the specialized agents"""
@@ -1857,6 +2014,14 @@ Always focus on clear and concise email body with actionable recommendations, ow
 - Never attribute fault to named individuals. Keep operator references
   neutral (associations, not blame) and direct action recommendations
   at processes, instructions, or conditions.
+- Never describe what a machine physically does beyond its recorded
+  Name, Type, and work center - not even if a subagent did; strip such
+  inventions from the final report.
+- When two subagents report conflicting numbers or attributions for the
+  same fact (e.g. different machines leading the defect count), do not
+  present either as validated: put the conflict in Data Reliability
+  Flags, cap the certainty of everything built on it at LOW, and name
+  the tool result that would resolve it.
 - Your final report is a synthesis for a human domain expert, not a
   transcript. For each finding include: what was observed, the causal
   mechanism (WHY), the supporting evidence with its tool source, and
@@ -2154,10 +2319,18 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
                - Focus on {defect_type} defect occurrences and context
                - Include enabled analysis areas: {scope_text}
                - Gather historical patterns and operational context
-            
+               - All counts (per machine, shift, date, cause, severity) must
+                 come from summarize_defect_distribution; raw-row tools are
+                 for examples and timelines, never for counting
+               - Tools tied to disabled scope areas may be used for context
+                 only, labeled [context only - outside enabled scope]
+
             2. **Analysis Phase**: Call Analyzer Agent for root cause analysis
                - Analyze monitoring data for {defect_type} root causes
                - Focus on enabled correlation areas: {scope_text}
+               - For maintenance correlation, use
+                 correlate_defects_with_maintenance (same-machine, time-ordered
+                 matching) rather than comparing separate defect and downtime lists
                - Rate the certainty of each hypothesis as HIGH/MEDIUM/LOW,
                  grounded only in tool results
 
