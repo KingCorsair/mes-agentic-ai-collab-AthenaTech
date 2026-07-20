@@ -341,6 +341,12 @@ class MESAgentManager:
         # Database path
         self.db_path = db_path
 
+        # Newest timestamp in the database. Look-back windows count back
+        # from this anchor instead of from today, so the frozen synthetic
+        # dataset stays inside every window no matter when the demo runs
+        # (previously a "last 7 days" run could miss the data entirely).
+        self.data_anchor_date = self._load_data_anchor()
+
         # Anthropic API key from .env / environment
         api_key = os.getenv("ANTHROPIC_API_KEY")
 
@@ -475,6 +481,33 @@ class MESAgentManager:
             logger.warning(f"Database file not found: {self.db_path}")
             raise FileNotFoundError(f"Database file not found: {self.db_path}")
         return sqlite3.connect(self.db_path)
+
+    def _load_data_anchor(self):
+        """Newest timestamp across the main time-bearing tables."""
+        try:
+            conn = self.get_db_connection()
+            row = conn.execute(
+                "SELECT MAX(t) FROM ("
+                "SELECT MAX(Date) as t FROM QualityControl "
+                "UNION ALL SELECT MAX(StartTime) FROM Downtimes "
+                "UNION ALL SELECT MAX(ActualEndTime) FROM WorkOrders)"
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                anchor = pd.to_datetime(row[0]).to_pydatetime()
+                logger.info(f"  Data anchor (newest record): {anchor:%Y-%m-%d}")
+                return anchor
+        except Exception as e:
+            logger.warning(f"Data anchor detection failed, falling back to now: {e}")
+        return datetime.now()
+
+    def _cutoff_date(self, days_back) -> str:
+        """Start date of a look-back window, counted back from the data
+        anchor (newest database record) rather than from today."""
+        days_back = int(days_back)
+        if days_back < 0 or days_back > 3650:
+            raise ValueError("days_back must be between 0 and 3650")
+        return (self.data_anchor_date - timedelta(days=days_back)).strftime('%Y-%m-%d')
     
     def _validate_table_name(self, table_name: str) -> bool:
         """Validate table name against allowed list"""
@@ -742,7 +775,7 @@ class MESAgentManager:
             if days_back < 0 or days_back > 3650:
                 raise ValueError("days_back must be between 0 and 3650")
 
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
 
             query = """
             SELECT
@@ -797,7 +830,7 @@ class MESAgentManager:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             SELECT 
@@ -840,7 +873,7 @@ class MESAgentManager:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             SELECT 
@@ -890,7 +923,7 @@ class MESAgentManager:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             SELECT 
@@ -937,7 +970,7 @@ class MESAgentManager:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             SELECT 
@@ -988,7 +1021,7 @@ class MESAgentManager:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             SELECT 
@@ -1045,7 +1078,7 @@ class MESAgentManager:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             SELECT 
@@ -1094,7 +1127,7 @@ class MESAgentManager:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             WITH changeover_times AS (
@@ -1168,7 +1201,7 @@ class MESAgentManager:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             SELECT 
@@ -1215,15 +1248,20 @@ class MESAgentManager:
                 "OEE, scrap and downtime to spot the weakest performers."))
 
         @tool
-        def analyze_quality_defects(days_back: int = 7):
-            """Analyze quality defects and their root causes"""
+        def analyze_quality_defects(days_back: int = 7, defect_type: str = None):
+            """Analyze quality defects and their recorded root causes,
+            grouped by defect type, root cause, product, machine, operator
+            and shift. Always pass defect_type to restrict the analysis to
+            the defect under investigation; omitting it returns every
+            defect type in the plant, which is a very large payload only
+            useful for deliberate cross-defect comparison."""
             # Validate input
             days_back = int(days_back)
             if days_back < 0 or days_back > 3650:
                 raise ValueError("days_back must be between 0 and 3650")
             
             # Calculate the cutoff date
-            cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            cutoff_date = self._cutoff_date(days_back)
             
             query = """
             SELECT 
@@ -1258,17 +1296,26 @@ class MESAgentManager:
                 Employees e ON wo.EmployeeID = e.EmployeeID
             JOIN 
                 Shifts s ON e.ShiftID = s.ShiftID
-            WHERE 
+            WHERE
                 date(qc.Date) >= ?
-            GROUP BY 
+                {defect_filter}
+            GROUP BY
                 d.DefectType, d.RootCause, p.ProductID, m.MachineID, e.EmployeeID, s.ShiftID
-            ORDER BY 
+            ORDER BY
                 DefectCount DESC, d.Severity DESC
             """
 
+            # The filter clause is a fixed literal; the value itself stays
+            # a bound parameter.
+            if defect_type:
+                query = query.format(defect_filter="AND d.DefectType = ?")
+                return self._execute_safe_query(query, (cutoff_date, defect_type), purpose=(
+                    f"Count '{defect_type}' defects by recorded root cause, product, "
+                    "machine, operator and shift, with average defect and yield rates."))
+            query = query.format(defect_filter="")
             return self._execute_safe_query(query, (cutoff_date,), purpose=(
-                "Count defects by type, recorded root cause, product, machine, "
-                "operator and shift, with average defect and yield rates."))
+                "Count defects of every type by recorded root cause, product, "
+                "machine, operator and shift, with average defect and yield rates."))
 
         self.analyzer_tools = [
             analyze_downtime_correlations,
@@ -1594,7 +1641,22 @@ class MESAgentManager:
 - Each KEY FINDING must be followed by one line starting "WHY: " giving
   a 1-2 sentence causal mechanism in plain manufacturing terms (how this
   cause physically produces this defect). If the mechanism is not
-  certain, give the most plausible one and label it "(hypothesis)".
+  certain, give the most plausible one and label it "(hypothesis)". If
+  the mechanism comes from general manufacturing knowledge rather than
+  this dataset (e.g. warm-up cycles, contact resistance), label it
+  "(hypothesis - domain knowledge, not in MES data)".
+- Data from a disabled analysis area may be used only as supporting
+  context and must be labeled "[context only - outside enabled scope]"
+  wherever it is cited.
+- Defect rows are records, not units: one record may cover several units
+  (Quantity column) or a single inspection. Say "N defect records";
+  state a unit count only when it comes from summing Quantity in a tool
+  result.
+- Describe operator findings neutrally as associations ("records
+  associated with operator X"). Never attribute fault or competence to a
+  named person, and never recommend action against an individual;
+  recommend reviewing procedures, work instructions, or conditions
+  instead.
 """
 
         """Initialize the specialized agents"""
@@ -1741,16 +1803,18 @@ Note: Email notifications are handled by the Executor Agent.""" + OUTPUT_RULES
             system_prompt="""You are the Executor Agent for a Manufacturing Execution System (MES).
 
 Your primary responsibilities:
-1. **Action Plan Execution**: Transform human understandable action plan into MES specific technical action items
-2. **Implementation Strategy**: Receive implementation strategy in terms of medium, short term and long term and take action as appropriate 
+1. **Action Plan Execution**: Turn the approved action plan into concrete, assignable next steps for the human teams named in it
+2. **Implementation Strategy**: Receive implementation strategy in terms of medium, short term and long term and take action as appropriate
 3. **Email Generation**: Receive comprehensive PDF reports with findings and recommendations and send it in a summarized as well as detailed text through one email
-4. **MES API Execution**: Based on actionable plan, execute MES API for immediate actionable item
 
 When executing action plans:
 - Accept actionable plan from planner agent
 - Draft email to emphasize on four factors (quality, cost, safety, efficiency)
 - Send only one email for short-term and long-term action items
-- Execute MES API for immediate action item
+- The only real action channel in this demo is the email notification
+  (dry-run by default). Present every other action as a proposal for the
+  human teams named in the plan; never claim an action was executed in
+  any system, and never offer to execute one
 
 Email report should include:
 1. Detail of all short-term and long-term actionable items
@@ -1786,6 +1850,13 @@ Always focus on clear and concise email body with actionable recommendations, ow
   "world-class" figures, or "required" durations unless those values
   appear in tool results.
 - Express certainty only as HIGH / MEDIUM / LOW with a one-line reason.
+- Treat subagent statements labeled "[context only - outside enabled
+  scope]" as context, not findings; carry the label into the report.
+- Defect counts are record counts, not unit counts, unless a tool summed
+  the Quantity column; keep that distinction wherever counts appear.
+- Never attribute fault to named individuals. Keep operator references
+  neutral (associations, not blame) and direct action recommendations
+  at processes, instructions, or conditions.
 - Your final report is a synthesis for a human domain expert, not a
   transcript. For each finding include: what was observed, the causal
   mechanism (WHY), the supporting evidence with its tool source, and
@@ -1882,6 +1953,13 @@ Your primary responsibility is to orchestrate the complete defect analysis workf
 Your task instructions include the filename under which your final report
 will be published. Pass that exact filename to the Executor Agent for the
 email notification link. Do not invent or alter it.
+
+**Between phases:**
+After each subagent returns and before you call the next one, start your
+narration with a single line "What changed: ..." — one sentence naming
+what that agent added, rejected, or downgraded (e.g. "What changed: the
+Verifier rejected operator causation and deferred the equipment
+upgrade."). This line is for the live audience following the workflow.
 
 **Output Format:**
 Always return a structured analysis result containing:
@@ -2024,6 +2102,8 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
             "days_back": days_back,
             "scope": scope_text,
             "run_id": run_id,
+            "window_start": self._cutoff_date(days_back),
+            "window_end": self.data_anchor_date.strftime('%Y-%m-%d'),
         })
 
         try:
@@ -2038,20 +2118,29 @@ Focus on ensuring each agent receives appropriate context and scope parameters, 
                 stats = self.get_defect_window_stats(defect_type, days_back)
                 if stats.get("success") and stats.get("rows"):
                     row = stats["rows"][0]
+                    window_start = self._cutoff_date(days_back)
+                    window_end = self.data_anchor_date.strftime('%Y-%m-%d')
                     data_context = f"""
             Data context (verified directly against the database just before this run):
-            - '{defect_type}' records inside the {days_back}-day window: {row.get('WindowCount')}
-            - Most recent '{defect_type}' record in the entire database: {row.get('LastOccurrence') or 'none'}
+            - Analysis window: {window_start} to {window_end}. Windows count back from
+              the newest record in the database ({window_end}), not from today's date.
+              State these window dates exactly; never infer or report a different range.
+            - '{defect_type}' records inside this window: {row.get('WindowCount')}
+            - '{defect_type}' records in the entire database: {row.get('TotalCount')}
+            - Most recent '{defect_type}' record: {row.get('LastOccurrence') or 'none'}
+            If records cluster at the window's start date, treat that as a
+            window-boundary artifact - data from before the boundary was not
+            queried - not as evidence of a sudden process event.
             If the window holds zero records, the correct finding is that the
-            analysis window does not overlap the available data - report that
-            plainly. Do not conclude data-collection or infrastructure failure,
-            and correct any subagent that does.
+            window does not overlap this defect's data - report that plainly.
+            Do not conclude data-collection or infrastructure failure, and
+            correct any subagent that does.
             """
             except Exception as e:
                 logger.warning(f"Window stats pre-check failed: {e}")
 
             supervisor_prompt = f"""
-            Execute comprehensive defect analysis workflow for defect type '{defect_type}' over the last {days_back} days.
+            Execute comprehensive defect analysis workflow for defect type '{defect_type}' over the last {days_back} days of recorded data.
 
             Analysis Scope Configuration:
             - OEE Analysis: {'Enabled' if include_oee else 'Disabled'}
@@ -2304,7 +2393,7 @@ PDF report:
             raise ValueError("days_back must be between 0 and 3650")
         
         # Calculate the cutoff date
-        cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        cutoff_date = self._cutoff_date(days_back)
         
         sql_query = """
         SELECT DISTINCT d.DefectType
@@ -2327,11 +2416,15 @@ PDF report:
         if days_back < 0 or days_back > 3650:
             raise ValueError("days_back must be between 0 and 3650")
 
-        cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        cutoff_date = self._cutoff_date(days_back)
 
         sql_query = """
         SELECT
             COUNT(*) as WindowCount,
+            (SELECT COUNT(*)
+             FROM Defects d3
+             JOIN QualityControl qc3 ON d3.CheckID = qc3.CheckID
+             WHERE d3.DefectType = ?) as TotalCount,
             (SELECT MAX(qc2.Date)
              FROM Defects d2
              JOIN QualityControl qc2 ON d2.CheckID = qc2.CheckID
@@ -2342,14 +2435,16 @@ PDF report:
             AND date(qc.Date) >= ?
         """
 
-        return self._execute_safe_query(sql_query, (defect_type, defect_type, cutoff_date), purpose=(
-            "Count this defect's records inside the selected look-back window "
-            "and find its most recent occurrence in the whole database."))
+        return self._execute_safe_query(
+            sql_query, (defect_type, defect_type, defect_type, cutoff_date), purpose=(
+                "Count this defect's records inside the selected look-back window, "
+                "count them across the whole database for contrast, and find the "
+                "most recent occurrence."))
 
     def get_defect_preview(self, defect_type):
         """Execute SQL query directly without going through agent"""
-        # Calculate the cutoff date (30 days back)
-        cutoff_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        # Calculate the cutoff date (30 days back from the data anchor)
+        cutoff_date = self._cutoff_date(30)
         
         sql_query = """
         SELECT 

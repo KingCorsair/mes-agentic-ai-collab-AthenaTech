@@ -66,6 +66,13 @@ All configuration is read from `.env` in the project root at import time.
   Defect types are not confined to the work center their name suggests.
 - SQLite dialect only. No `TOP`, `DATEADD`, `NOW() - INTERVAL`, `DATE_SUB` — use
   `date(...)`, `julianday(...)`, parameterized cutoff dates.
+- **Look-back windows are anchored to the newest record in `mes.db`**
+  (`MESAgentManager.data_anchor_date`, computed at init; cutoffs via
+  `self._cutoff_date(days_back)`), NOT to today's date. The dataset is frozen
+  (currently ends 2026-07-07), so anchoring keeps every window inside the data
+  no matter when the demo runs. Never reintroduce `datetime.now()` cutoffs in
+  tools — a "last 7 days" run would return zero rows and the agents would
+  invent an infrastructure-failure story around it.
 
 ## Architecture map
 

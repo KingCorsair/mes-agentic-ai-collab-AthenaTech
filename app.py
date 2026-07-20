@@ -418,8 +418,11 @@ def render_live_feed(events, running=True):
 
     if run["started"]:
         payload = run["started"]["payload"]
+        window = ""
+        if payload.get("window_start") and payload.get("window_end"):
+            window = f" of data ({payload['window_start']} → {payload['window_end']})"
         st.caption(
-            f"Run started — {payload.get('defect_type')}, last {payload.get('days_back')} days"
+            f"Run started — {payload.get('defect_type')}, last {payload.get('days_back')} days{window}"
             f" · scope: {payload.get('scope')}"
         )
 
@@ -668,14 +671,15 @@ def check_analysis_window(defect_type: str, days_back: int):
         if (row.get("WindowCount") or 0) > 0:
             return True, ""
         last = row.get("LastOccurrence")
-        if last:
+        anchor = getattr(agent_manager, "data_anchor_date", None)
+        if last and anchor is not None:
             last_date = pd.to_datetime(last)
-            age_days = (datetime.now() - last_date).days
+            gap_days = (pd.Timestamp(anchor) - last_date).days
             return False, (
-                f"⏳ No **{defect_type}** records exist in the last {days_back} days — "
-                f"the most recent is from **{last_date.strftime('%Y-%m-%d')}** "
-                f"({age_days} days ago). Widen the look-back period to at least "
-                f"{age_days + 1} days, then press Run Analysis again."
+                f"⏳ No **{defect_type}** records exist in the last {days_back} days "
+                f"of data — the most recent is from **{last_date.strftime('%Y-%m-%d')}**. "
+                f"Widen the look-back period to at least {gap_days + 1} days, "
+                f"then press Run Analysis again."
             )
         return False, (
             f"⏳ No **{defect_type}** records exist anywhere in the database, "
@@ -751,7 +755,14 @@ def render_defect_preview(defect_type: str):
             # The preview query counts a fixed 30-day window; the analysis
             # uses the sidebar's look-back. Label the window so the two
             # never look contradictory (e.g. 412 here vs 0 in a 7-day run).
-            st.caption("All numbers below cover the last 30 days of records.")
+            anchor = getattr(agent_manager, "data_anchor_date", None)
+            if anchor is not None:
+                st.caption(
+                    f"All numbers below cover the 30 days of data ending "
+                    f"{anchor:%Y-%m-%d} (the newest record in the database)."
+                )
+            else:
+                st.caption("All numbers below cover the last 30 days of records.")
 
             col1, col2, col3 = st.columns(3)
 
@@ -878,6 +889,10 @@ def render_main_dashboard():
     st.markdown("""
     **AI-powered defect analysis** using specialized agents working in sequence to monitor, analyze, plan, and verify quality improvements.
     """)
+    st.caption(
+        "Demo environment: all data comes from a synthetic MES database — "
+        "OEE values and thresholds are illustrative, not calibrated to a real plant."
+    )
     
     # Check for URL-based PDF viewing first
     url_pdf = get_pdf_from_url()
