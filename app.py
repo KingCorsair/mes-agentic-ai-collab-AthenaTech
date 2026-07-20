@@ -197,6 +197,30 @@ def _plain_agent_name(agent_name):
     return f"{str(agent_name or 'supervisor').capitalize()} Agent"
 
 
+def _format_structured(value, depth=0):
+    """Markdown bullet lines for a dict/list tool input, so structured
+    inputs read as a tidy indented list instead of raw JSON."""
+    pad = "  " * depth
+    lines = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                lines.append(f"{pad}- **{key}**:")
+                lines.extend(_format_structured(item, depth + 1))
+            else:
+                lines.append(f"{pad}- **{key}**: {item}")
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                lines.append(f"{pad}-")
+                lines.extend(_format_structured(item, depth + 1))
+            else:
+                lines.append(f"{pad}- {item}")
+    else:
+        lines.append(f"{pad}- {value}")
+    return lines
+
+
 def _group_events(events):
     """Fold the flat event list into a run header plus a chronological
     timeline of subagent activations and, between them, the Supervisor's
@@ -299,17 +323,23 @@ def _render_event_items(items):
         if etype == "tool_started":
             name = payload.get("tool_name")
             arguments = payload.get("arguments")
-            # Split the tool's inputs: short parameters stay inline on the
-            # call line; long agent-written text (a handoff document, an
-            # email body) renders below as readable prose, never as a raw
-            # dict the reader has to mentally unescape.
+            # Split the tool's inputs three ways: short scalars stay inline
+            # on the call line; long agent-written text renders below as
+            # quoted prose; dict/list inputs render below as bullet lists.
+            # Nothing is elided — every input appears in full somewhere,
+            # so the call line never needs a truncation-looking ellipsis.
             long_texts = {}
+            structured = {}
             if isinstance(arguments, dict):
-                short = {k: v for k, v in arguments.items() if len(str(v)) <= 200}
-                long_texts = {k: str(v) for k, v in arguments.items() if len(str(v)) > 200}
+                short = {}
+                for key, value in arguments.items():
+                    if isinstance(value, (dict, list)):
+                        structured[key] = value
+                    elif len(str(value)) > 200:
+                        long_texts[key] = str(value)
+                    else:
+                        short[key] = value
                 inline_args = ", ".join(f"{k}={v!r}" for k, v in short.items())
-                if long_texts:
-                    inline_args = f"{inline_args}, …" if inline_args else "…"
             else:
                 # Events recorded before arguments were structured.
                 text = " ".join(str(arguments or "").split())
@@ -333,6 +363,12 @@ def _render_event_items(items):
                     f"text and passed it to the tool as `{key}`:"
                 )
                 st.markdown("> " + text.replace("\n", "\n> "))
+            for key, value in structured.items():
+                st.caption(
+                    f"📋 The {_plain_agent_name(event.get('agent'))} filled in "
+                    f"this structured input and passed it to the tool as `{key}`:"
+                )
+                st.markdown("\n".join("> " + line for line in _format_structured(value)))
             for sql_event in sql_by_tool.get(payload.get("tool_use_id"), []):
                 _render_sql_event(sql_event)
         elif etype == "agent_message":
