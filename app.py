@@ -192,6 +192,11 @@ def _agent_label(agent_name):
     return AGENT_LABELS.get(agent_name, f"🤖 {agent_name}")
 
 
+def _plain_agent_name(agent_name):
+    """Emoji-free name for use mid-sentence ('The Planner Agent wrote…')."""
+    return f"{str(agent_name or 'supervisor').capitalize()} Agent"
+
+
 def _group_events(events):
     """Fold the flat event list into a run header plus a chronological
     timeline of subagent activations and, between them, the Supervisor's
@@ -255,6 +260,9 @@ def _group_events(events):
 
 def _render_sql_event(event):
     payload = event.get("payload") or {}
+    purpose = payload.get("purpose")
+    if purpose:
+        st.markdown(f"🗄️ The tool asked the MES database: *“{purpose}”* — as this SQL query:")
     if event.get("type") == "sql_failed":
         st.warning(f"🗄️ SQL failed: {payload.get('error')}")
         st.code(payload.get("sql", ""), language="sql", wrap_lines=True)
@@ -290,11 +298,24 @@ def _render_event_items(items):
 
         if etype == "tool_started":
             name = payload.get("tool_name")
-            # Short arguments read fine inline; long ones (agent-written
-            # handoff text) go in their own wrapped block below the call
-            # line so nothing gets cut off mid-word.
-            args = " ".join(str(payload.get("arguments") or "").split())
-            inline_args = args if len(args) <= 200 else "…"
+            arguments = payload.get("arguments")
+            # Split the tool's inputs: short parameters stay inline on the
+            # call line; long agent-written text (a handoff document, an
+            # email body) renders below as readable prose, never as a raw
+            # dict the reader has to mentally unescape.
+            long_texts = {}
+            if isinstance(arguments, dict):
+                short = {k: v for k, v in arguments.items() if len(str(v)) <= 200}
+                long_texts = {k: str(v) for k, v in arguments.items() if len(str(v)) > 200}
+                inline_args = ", ".join(f"{k}={v!r}" for k, v in short.items())
+                if long_texts:
+                    inline_args = f"{inline_args}, …" if inline_args else "…"
+            else:
+                # Events recorded before arguments were structured.
+                text = " ".join(str(arguments or "").split())
+                inline_args = text if len(text) <= 200 else "…"
+                if inline_args != text:
+                    long_texts = {"arguments": text}
             done = completed_by_id.get(payload.get("tool_use_id"))
             if done is None:
                 st.markdown(f"🔧 `{name}({inline_args})` — running…")
@@ -306,8 +327,12 @@ def _render_event_items(items):
                     st.warning(f"🔧 `{name}({inline_args})` failed: {done_payload.get('error')}")
                 else:
                     st.markdown(f"🔧 `{name}({inline_args})`{duration_text}")
-            if inline_args != args:
-                st.code(args, language=None, wrap_lines=True)
+            for key, text in long_texts.items():
+                st.markdown(
+                    f"📝 *The {_plain_agent_name(event.get('agent'))} wrote this "
+                    f"text and passed it to the tool as* `{key}`:"
+                )
+                st.markdown("> " + text.replace("\n", "\n> "))
             for sql_event in sql_by_tool.get(payload.get("tool_use_id"), []):
                 _render_sql_event(sql_event)
         elif etype == "agent_message":

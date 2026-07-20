@@ -267,10 +267,21 @@ class _ObservabilityHooks(HookProvider):
         tool_use_id = tool_use.get("toolUseId")
         _ACTIVE_TOOL_USE_ID.set(tool_use_id)
         self._tool_starts[tool_use_id] = time.time()
+        # Emit the input dict structured, not as one repr string, so the
+        # UI can show short parameters inline and long agent-written text
+        # (e.g. create_action_plan's analysis_data) as readable prose.
+        tool_input = tool_use.get("input")
+        if isinstance(tool_input, dict):
+            arguments = {
+                key: (value[:30000] if isinstance(value, str) else value)
+                for key, value in tool_input.items()
+            }
+        else:
+            arguments = self._manager._preview(tool_input, 4000)
         self._manager._emit("tool_started", {
             "tool_name": tool_use.get("name"),
             "tool_use_id": tool_use_id,
-            "arguments": self._manager._preview(tool_use.get("input"), 4000),
+            "arguments": arguments,
         })
 
     def _after_tool(self, event):
@@ -469,8 +480,15 @@ class MESAgentManager:
         """Validate table name against allowed list"""
         return table_name in self.allowed_tables
     
-    def _execute_safe_query(self, query: str, params: tuple = None):
-        """Execute SQL query safely with parameterized queries"""
+    def _execute_safe_query(self, query: str, params: tuple = None, purpose: str = None):
+        """Execute SQL query safely with parameterized queries.
+
+        `purpose` is a handwritten plain-English sentence describing what
+        the query asks the database; it rides along in the sql_executed /
+        sql_failed events so the UI can show it above the SQL for readers
+        who don't speak SQL. Keeping it at the call site next to the query
+        stops the explanation drifting from what the query actually does.
+        """
         logger.info(f"Executing parameterized SQL query")
         logger.debug(f"SQL: {' '.join(str(query).split())[:300]}")
         logger.debug(f"SQL params: {params}")
@@ -510,6 +528,7 @@ class MESAgentManager:
             self._emit("sql_executed", {
                 "sql": self._preview(query, 4000),
                 "params": self._preview(params, 200) if params else None,
+                "purpose": purpose,
                 "row_count": len(df),
                 "execution_time_ms": result["execution_time_ms"],
                 "tool_use_id": _ACTIVE_TOOL_USE_ID.get(),
@@ -527,6 +546,7 @@ class MESAgentManager:
             self._emit("sql_failed", {
                 "sql": self._preview(query, 4000),
                 "params": self._preview(params, 200) if params else None,
+                "purpose": purpose,
                 "error": error_msg,
                 "execution_time_ms": error_result["execution_time_ms"],
                 "tool_use_id": _ACTIVE_TOOL_USE_ID.get(),
@@ -582,10 +602,23 @@ class MESAgentManager:
                 """
             }
             
+            query_purposes = {
+                "get_tables": "List the name of every table in the MES database.",
+                "get_recent_oee": (
+                    "Fetch the 100 most recent daily OEE records — availability, "
+                    "performance and quality — for each machine."
+                ),
+                "get_recent_downtime": (
+                    "Fetch the 100 most recent machine stoppages with their "
+                    "reason and duration."
+                ),
+            }
+
             # Check if the query is in allowed list
             query_key = sql_query.strip().lower()
             if query_key in allowed_queries:
-                return self._execute_safe_query(allowed_queries[query_key])
+                return self._execute_safe_query(
+                    allowed_queries[query_key], purpose=query_purposes.get(query_key))
             else:
                 # For security, only allow predefined queries
                 logger.warning(f"Query not in allowed list: {sql_query}")
@@ -743,7 +776,10 @@ class MESAgentManager:
             LIMIT 200
             """
 
-            return self._execute_safe_query(query, (defect_type, cutoff_date))
+            return self._execute_safe_query(query, (defect_type, cutoff_date), purpose=(
+                f"List every recorded '{defect_type}' defect in the window — when it "
+                "was found, how severe it was, and the product, machine, work "
+                "center, operator and shift involved."))
         
         @tool
         def fetch_oee_metrics(days_back: int = 7):
@@ -782,8 +818,11 @@ class MESAgentManager:
             ORDER BY 
                 oee.OEE ASC, oee.Date DESC
             """
-            
-            return self._execute_safe_query(query, (cutoff_date,))
+
+            return self._execute_safe_query(query, (cutoff_date,), purpose=(
+                "Pull each machine's daily OEE scores — availability, performance "
+                "and quality — for the window, flagging days that fall below the "
+                "60%/75% thresholds."))
 
         @tool
         def fetch_downtime_events(days_back: int = 7):
@@ -829,8 +868,11 @@ class MESAgentManager:
             ORDER BY 
                 dt.Duration DESC, dt.StartTime DESC
             """
-            
-            return self._execute_safe_query(query, (cutoff_date,))
+
+            return self._execute_safe_query(query, (cutoff_date,), purpose=(
+                "List every machine stoppage in the window with its reason and "
+                "duration, plus whichever work order, product and operator were "
+                "running at the time."))
 
         @tool
         def fetch_historical_patterns(days_back: int = 7):
@@ -874,8 +916,10 @@ class MESAgentManager:
             ORDER BY 
                 EventCount DESC, AvgDuration DESC
             """
-            
-            return self._execute_safe_query(query, (cutoff_date,))
+
+            return self._execute_safe_query(query, (cutoff_date,), purpose=(
+                "Count stoppages by date, weekday, hour and reason to surface "
+                "recurring downtime patterns."))
 
         @tool
         def fetch_work_orders_context(days_back: int = 7):
@@ -920,11 +964,13 @@ class MESAgentManager:
                 Shifts s ON e.ShiftID = s.ShiftID
             WHERE 
                 date(wo.ActualStartTime) >= ?
-            ORDER BY 
+            ORDER BY
                 wo.ActualStartTime DESC
             """
-            
-            return self._execute_safe_query(query, (cutoff_date,))
+
+            return self._execute_safe_query(query, (cutoff_date,), purpose=(
+                "List the window's work orders with planned versus actual "
+                "production, scrap and completion rate."))
 
         @tool
         def fetch_operator_logs(days_back: int = 7):
@@ -965,8 +1011,10 @@ class MESAgentManager:
             ORDER BY 
                 wo.ActualStartTime DESC
             """
-            
-            return self._execute_safe_query(query, (cutoff_date,))
+
+            return self._execute_safe_query(query, (cutoff_date,), purpose=(
+                "Summarize each operator's daily shift performance — orders "
+                "handled, average completion rate and total scrap."))
 
         self.monitor_tools = [
             fetch_oee_metrics,
@@ -1025,8 +1073,10 @@ class MESAgentManager:
             ORDER BY 
                 TotalDuration DESC
             """
-            
-            return self._execute_safe_query(query, (cutoff_date,))
+
+            return self._execute_safe_query(query, (cutoff_date,), purpose=(
+                "Group downtime by reason, shift, operator, product and machine "
+                "type to show which combinations lose the most production time."))
 
         @tool
         def analyze_batch_changeover_time(days_back: int = 7):
@@ -1097,7 +1147,10 @@ class MESAgentManager:
                 AvgChangeoverMinutes DESC
             """
             
-            return self._execute_safe_query(query, (cutoff_date, cutoff_date))
+            return self._execute_safe_query(query, (cutoff_date, cutoff_date), purpose=(
+                "Measure the idle gap between consecutive work orders on each "
+                "machine to find slow product changeovers versus the 60/120-minute "
+                "benchmarks."))
 
         @tool
         def identify_performance_patterns(days_back: int = 7):
@@ -1149,8 +1202,10 @@ class MESAgentManager:
             ORDER BY 
                 AvgOEE ASC, TotalDowntime DESC
             """
-            
-            return self._execute_safe_query(query, (cutoff_date,))
+
+            return self._execute_safe_query(query, (cutoff_date,), purpose=(
+                "Rank each machine, operator and shift combination by average "
+                "OEE, scrap and downtime to spot the weakest performers."))
 
         @tool
         def analyze_quality_defects(days_back: int = 7):
@@ -1203,8 +1258,10 @@ class MESAgentManager:
             ORDER BY 
                 DefectCount DESC, d.Severity DESC
             """
-            
-            return self._execute_safe_query(query, (cutoff_date,))
+
+            return self._execute_safe_query(query, (cutoff_date,), purpose=(
+                "Count defects by type, recorded root cause, product, machine, "
+                "operator and shift, with average defect and yield rates."))
 
         self.analyzer_tools = [
             analyze_downtime_correlations,
@@ -2210,7 +2267,8 @@ PDF report:
         ORDER BY d.DefectType
         """
         
-        return self._execute_safe_query(sql_query, (cutoff_date,))
+        return self._execute_safe_query(sql_query, (cutoff_date,), purpose=(
+            "List the distinct defect types recorded in the window."))
 
     def get_defect_preview(self, defect_type):
         """Execute SQL query directly without going through agent"""
@@ -2236,4 +2294,6 @@ PDF report:
             AND date(qc.Date) >= ?
         """
         
-        return self._execute_safe_query(sql_query, (defect_type, cutoff_date))
+        return self._execute_safe_query(sql_query, (defect_type, cutoff_date), purpose=(
+            "Summarize the last 30 days of this defect type — total occurrences, "
+            "average severity, and how many machines and products it touched."))
