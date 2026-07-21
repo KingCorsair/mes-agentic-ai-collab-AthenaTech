@@ -72,13 +72,19 @@ All configuration is read from `.env` in the project root at import time.
   (currently ends 2026-07-07), so anchoring keeps every window inside the data
   no matter when the demo runs. Never reintroduce `datetime.now()` cutoffs in
   tools — a "last 7 days" run would return zero rows and the agents would
-  invent an infrastructure-failure story around it.
+  invent an infrastructure-failure story around it. "Last N days" means N
+  calendar dates ending at the anchor (7 days = 2026-07-01 through 2026-07-07).
 
 ## Architecture map
 
 - `strands_agent.py` — everything agentic. `MESAgentManager`:
   - `_init_*_tools()` methods define per-agent `@tool` functions (docstrings are
     what the model sees — keep them precise about what table/granularity a tool returns).
+    Two designated tools: `summarize_defect_distribution` is the ONLY sanctioned
+    source for counts of a defect type (SQL-computed, by machine/shift/date/root
+    cause/severity), and `correlate_defects_with_maintenance` matches defects to
+    same-machine downtime within the prior 72 hours. Fetch tools cap at
+    `LIMIT 300`; `analyze_downtime_correlations` at 500.
   - `_init_agents()` builds the five subagents (prompts live here, ~line 1000+).
   - `_init_supervisor_agent()` wraps each subagent as a tool
     (`call_monitor_agent`, ...) — agents-as-tools, hub-and-spoke topology.
@@ -88,7 +94,11 @@ All configuration is read from `.env` in the project root at import time.
 - `app.py` — Streamlit UI. Entire script reruns top-to-bottom on every user
   interaction; all long-running work must be guarded by the flag pattern above.
   All sidebar inputs are `disabled=` during a run.
-- `reports/` — generated PDFs. `.env` — all config. `mes.db` — the database.
+- `reports/` — generated PDFs plus `report_decisions.json` (Approve/Reject
+  verdicts recorded from the in-app report viewer; sidebar badges read it).
+  `.env` — all config. `mes.db` — the database. Emailed report links use
+  `MES_BASE_URL` if set; otherwise `app.py` auto-detects the public base URL
+  from request headers (Host + X-Forwarded-Proto).
 
 ## Known gotchas (each of these cost real debugging time)
 
@@ -108,7 +118,15 @@ All configuration is read from `.env` in the project root at import time.
   Fix is tool coverage + the DATABASE FACTS lines in prompts, not looser SQL access.
 - **LLM arithmetic is nondeterministic.** Totals/percentages must come from SQL
   (`SUM`, `COUNT`, `GROUP BY`), never from the model summing rows. If a number
-  in a report can't be traced to a tool result, it's invented.
+  in a report can't be traced to a tool result, it's invented. For defect
+  counts specifically, `summarize_defect_distribution` is the designated
+  source — don't let agents re-derive counts from raw fetch-tool rows (a
+  grouped result's row count is not a record count).
+- **Inline PDF preview needs `streamlit-pdf>=1.0.0,<2`.** `st.pdf()` on the
+  Streamlit 1.59 line delegates to that optional component; without it every
+  preview falls back to download-only, and streamlit-pdf 2.x requires a newer
+  Streamlit. Don't reintroduce the base64-iframe viewer — Chrome blocks
+  rendering `data:` PDFs inside iframes ("not allowed to display").
 - **Windows/Git Bash:** files use CRLF line endings — preserve them; venv
   activation is `.venv/Scripts/activate`; paths contain spaces ("ATUL ANAND") —
   quote them in commands.
@@ -122,7 +140,8 @@ Run one analysis (Battery Cell Variance, 7 days, Maintenance Correlation) and ch
 1. Startup log shows the intended `Model ID` and `Max Tokens: 16384`.
 2. Each `call_*_agent` appears exactly once in the log (no retry loops).
 3. Zero `max_tokens stop reason` lines, zero `Query not in allowed list` warnings.
-4. `analyze_downtime_correlations` returns well under 1,000 rows.
+4. `analyze_downtime_correlations` returns ≤500 rows (its LIMIT cap); fetch
+   tools ≤300.
 5. Full run completes in single-digit minutes.
 6. Spot-check one number in the report against the DB, e.g.:
    `SELECT COUNT(*) FROM Defects d JOIN QualityControl qc ON d.CheckID=qc.CheckID
