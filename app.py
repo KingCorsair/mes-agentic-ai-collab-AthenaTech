@@ -27,6 +27,77 @@ from strands_agent import MESAgentManager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Langfuse-inspired shell: a constrained, centered content column; a bordered
+# sidebar acting as the nav rail; soft slate borders on cards/expanders/metrics;
+# and quiet, underlined tabs. Streamlit can't reproduce Langfuse's React shell
+# exactly, but this approximates its clean, low-chrome look. Colors are the same
+# shadcn "slate" values set in .streamlit/config.toml.
+THEME_CSS = """
+<style>
+:root {
+  --lf-border: #E2E8F0;      /* slate-200 */
+  --lf-muted-fg: #64748B;    /* slate-500 */
+  --lf-surface: #F8FAFC;     /* slate-50  */
+}
+
+/* Constrain and center the main content, like Langfuse's container pages. */
+.block-container {
+  max-width: 1120px;
+  padding-top: 2.2rem;
+  padding-bottom: 3rem;
+}
+
+/* Sidebar as a bordered navigation rail. */
+section[data-testid="stSidebar"] {
+  background-color: var(--lf-surface);
+  border-right: 1px solid var(--lf-border);
+}
+
+/* Cards, expanders and metrics get soft slate borders and a small radius. */
+[data-testid="stExpander"],
+[data-testid="stMetric"] {
+  border: 1px solid var(--lf-border);
+  border-radius: 10px;
+  box-shadow: none;
+}
+[data-testid="stMetric"] {
+  padding: 12px 16px;
+  background: #FFFFFF;
+}
+
+/* Buttons: subtle border, gentle radius. */
+.stButton > button,
+.stDownloadButton > button {
+  border-radius: 8px;
+  border: 1px solid var(--lf-border);
+}
+
+/* Tabs: quiet, with an underlined active tab. */
+.stTabs [data-baseweb="tab-list"] {
+  gap: 6px;
+  border-bottom: 1px solid var(--lf-border);
+}
+.stTabs [data-baseweb="tab"] {
+  font-size: 0.92rem;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* Breadcrumb line above the page title. */
+.lf-breadcrumb {
+  color: var(--lf-muted-fg);
+  font-size: 0.8rem;
+  letter-spacing: 0.01em;
+  margin-bottom: 0.15rem;
+}
+</style>
+"""
+
+
+def inject_theme():
+    """Apply the Langfuse-inspired shell styling (see THEME_CSS)."""
+    st.markdown(THEME_CSS, unsafe_allow_html=True)
+
 # Initialize session state
 if 'analysis_started' not in st.session_state:
     st.session_state.analysis_started = False
@@ -944,6 +1015,10 @@ def render_sidebar_configuration():
 def render_main_dashboard():
     """Render the main dashboard interface"""
     
+    st.markdown(
+        '<div class="lf-breadcrumb">Manufacturing Operations › Defect Analysis</div>',
+        unsafe_allow_html=True,
+    )
     st.header("🏭 Manufacturing Defect Analysis")
     st.markdown(
         "Pick a defect type and get an AI-generated root-cause analysis with a "
@@ -1370,12 +1445,14 @@ def main():
     """Main function to run the MES dashboard"""
     
     st.set_page_config(
-        page_title="MES Quality Management", 
+        page_title="MES Quality Management",
         page_icon="🏭",
         layout="wide",
         initial_sidebar_state="expanded"
     )
-    
+
+    inject_theme()
+
     render_main_dashboard()
 
 if __name__ == "__main__":

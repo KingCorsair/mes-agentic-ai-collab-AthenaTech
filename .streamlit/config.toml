@@ -1,9 +1,11 @@
 [theme]
-# Professional industrial theme for the manufacturing defect-analysis app.
-primaryColor = "#0B6BCB"
+# Palette mirrors Langfuse's frontend (shadcn/ui "slate" light theme):
+# background #fff, near-black slate foreground/primary, slate-100 muted
+# surfaces, slate-200 borders.
+primaryColor = "#0F172A"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F1F5F9"
-textColor = "#1E293B"
+textColor = "#020817"
 font = "sans serif"
 
 [client]
