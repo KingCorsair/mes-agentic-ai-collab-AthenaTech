@@ -1,11 +1,9 @@
 [theme]
-# Palette mirrors Langfuse's frontend (shadcn/ui "slate" light theme):
-# background #fff, near-black slate foreground/primary, slate-100 muted
-# surfaces, slate-200 borders.
-primaryColor = "#0F172A"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F1F5F9"
-textColor = "#020817"
+base = "light"
+primaryColor = "#2563EB"
+backgroundColor = "#F6F8FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#172033"
 font = "sans serif"
 
 [client]

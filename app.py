@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import sys
 import os
 import json
+import re
 import logging
 import queue
 import threading
@@ -642,38 +643,36 @@ def render_trace(events):
         st.error(f"Run failed: {run['failed']['payload'].get('error')}")
 
 
-def run_defect_analysis(defect_type: str, days_back: int = 7, include_oee: bool = True, include_downtime: bool = True, include_changeover: bool = True, include_maintenance: bool = True):
-    """Run comprehensive defect analysis using the supervisor agent"""
-    
+def run_defect_analysis(defect_type: str, days_back: int = 7, include_oee: bool = True,
+                        include_downtime: bool = True, include_changeover: bool = True,
+                        include_maintenance: bool = True, render_fn=None):
+    """Execute the supervisor workflow in a background thread and stream events
+    to a live renderer, then validate and store the result.
+
+    Backend behavior is unchanged: same agent_manager.run_defect_analysis call,
+    same thread-safe event queue, same PDF validation. Only the presentation is
+    parameterized — `render_fn(events, running)` draws the live view (defaults to
+    the detailed feed; the redesigned UI passes a humanized st.status renderer).
+
+    Errors are recorded in st.session_state['run_error'] (rendered as plain
+    English by the caller with Retry/Reset) rather than drawn here, and the full
+    event log is always preserved in session state. Returns the result dict or
+    None on failure.
+    """
     agent_manager = get_agent_manager()
     if agent_manager is None:
-        st.error("Agent manager not available")
+        st.session_state.run_error = (
+            "The investigation service is unavailable. Please refresh the page and try again."
+        )
         return None
-    
+
+    render_fn = render_fn or render_live_feed
+
     try:
-        # Show progress
-        st.write("### 🤖 Supervisor Agent - Orchestrating Analysis Workflow")
-        
-        # Show analysis scope
-        scope_items = []
-        if include_oee:
-            scope_items.append("🔍 OEE Performance Analysis")
-        if include_downtime:
-            scope_items.append("⏱️ Downtime & Stoppages")
-        if include_changeover:
-            scope_items.append("🔄 Batch Changeover Analysis")
-        if include_maintenance:
-            scope_items.append("🔧 Maintenance Correlation")
-        
-        if scope_items:
-            st.info(f"**Analysis Scope:** {' • '.join(scope_items)}")
-        else:
-            st.warning("**No analysis scope selected** - Running basic analysis only")
-        
-        # The manager emits observability events from SDK worker threads,
-        # which must never touch Streamlit directly. So: events go into a
-        # thread-safe queue, the analysis runs in a background thread, and
-        # this (main) thread polls the queue and redraws the live feed.
+        # The manager emits observability events from SDK worker threads, which
+        # must never touch Streamlit directly. Events go into a thread-safe
+        # queue; the analysis runs in a background thread; this (main) thread
+        # polls the queue and redraws the live view.
         event_queue = queue.Queue()
         agent_manager.on_event = event_queue.put
 
@@ -695,11 +694,10 @@ def run_defect_analysis(defect_type: str, days_back: int = 7, include_oee: bool 
         worker = threading.Thread(target=_analysis_worker, daemon=True)
         worker.start()
 
-        st.markdown("#### 🔍 Live agent activity")
         feed_placeholder = st.empty()
         events = []
         with feed_placeholder.container():
-            render_live_feed(events)
+            render_fn(events, True)
 
         while worker.is_alive() or not event_queue.empty():
             drained = False
@@ -711,80 +709,62 @@ def run_defect_analysis(defect_type: str, days_back: int = 7, include_oee: bool 
                     break
             if drained:
                 with feed_placeholder.container():
-                    render_live_feed(events)
+                    render_fn(events, True)
             time.sleep(0.4)
 
         worker.join()
         agent_manager.on_event = None
 
-        # Keep the full event log for the post-run "under the hood" trace.
+        # Always preserve the full event log for the technical tabs and history,
+        # even on failure (so a failed run's steps stay visible).
         st.session_state.agent_event_log = events
         with feed_placeholder.container():
-            render_live_feed(events, running=False)
+            render_fn(events, False)
 
         if "error" in run_outcome:
-            st.error(f"Analysis failed: {run_outcome['error']}")
+            st.session_state.run_error = str(run_outcome["error"])
             return None
 
         analysis_results = run_outcome.get("result")
-
         if not isinstance(analysis_results, dict):
-            st.error("Analysis failed: no result was returned by the agent manager.")
+            st.session_state.run_error = "No result was returned by the investigation."
             return None
 
         if analysis_results.get("status") != "completed":
-            error_message = analysis_results.get(
-                "error",
-                "The workflow did not complete successfully.",
+            st.session_state.run_error = analysis_results.get(
+                "error", "The investigation did not complete successfully."
             )
-            st.error(f"Analysis failed: {error_message}")
             return None
 
         pdf_filename = analysis_results.get("pdf_filename")
         pdf_path_value = analysis_results.get("pdf_path")
-
         if not pdf_filename or not pdf_path_value:
-            st.error(
-                "The analysis completed, but no PDF information was returned."
-            )
-            logger.error(
-                "Completed analysis did not contain pdf_filename or pdf_path: %s",
-                analysis_results,
-            )
+            st.session_state.run_error = "The investigation completed but produced no report file."
+            logger.error("Completed analysis missing pdf info: %s", analysis_results)
             return None
 
         pdf_path = Path(pdf_path_value)
-
-        if not pdf_path.exists():
-            st.error(
-                f"The analysis completed, but the PDF file was not found: "
-                f"{pdf_path}"
+        if not pdf_path.exists() or pdf_path.stat().st_size == 0:
+            st.session_state.run_error = (
+                "The investigation completed but the report file is missing or empty."
             )
-            logger.error("Generated PDF does not exist: %s", pdf_path)
+            logger.error("Generated PDF missing/empty: %s", pdf_path)
             return None
-
-        if pdf_path.stat().st_size == 0:
-            st.error("The generated PDF file is empty.")
-            logger.error("Generated PDF is empty: %s", pdf_path)
-            return None
-
-        st.success("✅ Analysis and PDF report generated successfully")
 
         # Store results only after verifying the PDF.
         st.session_state.current_analysis = analysis_results
         st.session_state.analysis_started = True
-
-        logger.info(
-            "Analysis completed with report: %s",
-            pdf_path,
-        )
-
+        st.session_state.pop("run_error", None)
+        logger.info("Analysis completed with report: %s", pdf_path)
         return analysis_results
-        
+
     except Exception as e:
-        st.error(f"Error during analysis: {e}")
+        st.session_state.run_error = f"Error during investigation: {e}"
         logger.error(f"Analysis error: {e}")
         return None
+    finally:
+        if agent_manager is not None:
+            agent_manager.on_event = None
 
 def check_analysis_window(defect_type: str, days_back: int):
     """Pre-run check: refuse to launch the agents into a window that
@@ -1088,518 +1068,970 @@ def render_defect_preview(defect_type: str):
         st.error(f"Error loading defect preview: {e}")
         logger.error(f"Defect preview error: {e}")
 
-def render_sidebar_configuration():
-    """Render sidebar configuration options"""
-    
-    with st.sidebar:
-        st.divider()
-        
-        st.subheader("⚙️ Analysis Configuration")
-        
-        # Time period selection
-        time_option = st.selectbox(
-            "Look back Period",
-            ["Last 3 days", "Last 7 days", "Last 14 days", "Last 30 days","Last 120 days","Last 180 days","Last 365 days"],
-            index=1,  # Default to 7 days
-            disabled=st.session_state.analysis_running
-        )
-        days_back = int(time_option.split()[1])
-        
-        # Analysis scope
-        st.subheader("🔍 Analysis Scope")
-        include_oee = st.checkbox("OEE Performance Analysis", value=False, disabled=st.session_state.analysis_running)
-        include_downtime = st.checkbox("Downtime & Stoppages", value=False, disabled=st.session_state.analysis_running)
-        include_changeover = st.checkbox("Batch Changeover Analysis", value=False, disabled=st.session_state.analysis_running)
-        include_maintenance = st.checkbox("Maintenance Correlation", value=True, disabled=st.session_state.analysis_running)
-   
-        # Defect selection (moved here)
-        selected_defect = render_defect_selection()
-        
-        if st.session_state.get('analysis_started'):
-            if st.button("🔄 New Analysis", use_container_width=True):
-                st.session_state.analysis_started = False
-                st.session_state.current_analysis = {}
-                st.session_state.selected_defect = None
-                st.session_state.show_final_analysis = False
-                st.session_state.agent_event_log = []
-                st.rerun()
-        
-        # PDF Reports section
-        st.divider()
-        st.subheader("📁 Available Reports")
-        
-        available_reports = get_available_reports()
-        if available_reports:
-            count = len(available_reports)
-            st.write(f"Found {count} report" + ("s" if count != 1 else ""))
-            
-            decisions = load_report_decisions()
-            for report_file in available_reports[:5]:  # Show last 5 reports
-                file_name = report_file.name
-                verdict = decisions.get(file_name, {}).get("decision")
-                badge = "✅ " if verdict == "approved" else "❌ " if verdict == "rejected" else ""
-                if st.button(f"{badge}{file_name}", key=f"url_{file_name}"):
-                    # Update URL parameters to show this PDF
-                    st.query_params["pdf"] = file_name
-                    st.rerun()
-        else:
-            st.info("No PDF reports found")
-    
-    return {
-        'selected_defect': selected_defect,
-        'days_back': days_back,
-        'include_oee': include_oee,
-        'include_downtime': include_downtime,
-        'include_changeover': include_changeover,
-        'include_maintenance': include_maintenance
+
+# ===========================================================================
+# Redesigned UI: a guided investigation workspace.
+#
+# Navigation (native st.navigation): Investigate / Run History / How It Works.
+# Sidebar holds settings only. Case selection lives on the Investigate page.
+# Backend behavior is untouched — every function below reuses the existing
+# helpers (run_defect_analysis, get_defect_preview, _group_events, the report
+# decision log, PDF viewer, etc.). Raw JSON and SQL are hidden by default.
+# ===========================================================================
+
+RUNS_DIR = Path(__file__).resolve().parent / "runs"
+
+# Sample investigations for the empty state (real defect types are loaded live;
+# these are only shown as illustrative starting points).
+SAMPLE_INVESTIGATIONS = [
+    "Waterproofing Failure",
+    "Control Board Error",
+    "Sensor Malfunction",
+]
+
+
+def init_session_state():
+    """Centralized, rerun-safe defaults for every key the UI relies on.
+
+    Uses setdefault so a completed run is never wiped by a later rerun, and so
+    widget-bound keys (toggles, radios) exist before their widgets render.
+    """
+    defaults = {
+        # existing keys (preserved)
+        "analysis_started": False,
+        "current_analysis": {},
+        "defect_types": [],
+        "selected_defect": None,
+        "analysis_running": False,
+        "work_pending": False,
+        "agent_event_log": [],
+        "show_final_analysis": False,
+        # new keys
+        "investigation_mode": "record",
+        "user_question": "",
+        "run_params": {},
+        "approval_state": None,
+        "selected_history_row": None,
+        "learning_mode": False,
+        "show_technical_data": False,
     }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
-def render_main_dashboard():
-    """Render the main dashboard interface"""
-    
-    st.markdown(
-        '<div class="lf-breadcrumb">Manufacturing Operations › Defect Analysis</div>',
-        unsafe_allow_html=True,
+
+# ---------------------------------------------------------------------------
+# Derived facts from the event log (all real; nothing invented)
+# ---------------------------------------------------------------------------
+
+def _tool_calls(events):
+    """Count real tool invocations, excluding the supervisor's call_*_agent
+    delegations (those duplicate the agent activations)."""
+    return sum(
+        1 for e in events
+        if e.get("type") == "tool_started"
+        and not str((e.get("payload") or {}).get("tool_name", "")).startswith("call_")
     )
-    st.header("🏭 Manufacturing Defect Analysis")
-    st.markdown(
-        "Pick a defect type and get an AI-generated root-cause analysis with a "
-        "shareable PDF report — the equivalent of a quality engineer's write-up, in minutes."
+
+
+def _records_examined(events):
+    """Total rows returned across all successful SQL queries."""
+    return sum(
+        int((e.get("payload") or {}).get("row_count") or 0)
+        for e in events if e.get("type") == "sql_executed"
     )
-    st.caption(
-        "Demo environment: all data comes from a synthetic MES database — "
-        "OEE values and thresholds are illustrative, not calibrated to a real plant."
-    )
-    
-    # Check for URL-based PDF viewing first
-    url_pdf = get_pdf_from_url()
-    if url_pdf:
-        st.subheader(f"📄 Shared PDF Report: {url_pdf.name}")
 
-        # Human-in-the-loop review: decisions are recorded per report and
-        # shown here and in the sidebar list, so the buttons do something
-        # real instead of silently closing the viewer.
-        decision = load_report_decisions().get(url_pdf.name)
-        if decision:
-            verdict = "approved ✅" if decision.get("decision") == "approved" else "rejected ❌"
-            st.info(f"Human review: this plan was **{verdict}** on {decision.get('at')}.")
 
-        col1, col2, col3 = st.columns([2, 2, 1])
-        with col1:
-            if st.button("✅ Approve plan"):
-                record_report_decision(url_pdf.name, "approved")
-                st.rerun()
-        with col2:
-            if st.button("❌ Reject plan"):
-                record_report_decision(url_pdf.name, "rejected")
-                st.rerun()
+def _confidence_from_events(events):
+    """Best-effort verifier confidence, only if the verifier actually reported
+    one. Returns None otherwise (shown as 'Not scored') — never fabricated.
 
-        with col3:
-            if st.button("✖ Close view"):
-                # Clear URL parameters
-                st.query_params.clear()
-                st.rerun()
-        
-        pdf_data = display_pdf_viewer(url_pdf)
-        if pdf_data:
-            st.download_button(
-                "📥 Download This Report",
-                data=pdf_data,
-                file_name=url_pdf.name,
-                mime="application/pdf"
+    Note: the current verifier tool is a stub returning a fixed score, so this
+    is surfaced honestly and may read as a constant; see the backend notes.
+    """
+    for e in events:
+        payload = e.get("payload") or {}
+        blob = f"{payload}"
+        if "confidence_score" in blob:
+            m = re.search(r"confidence_score['\"]?\s*[:=]\s*([0-9]*\.?[0-9]+)", blob)
+            if m:
+                try:
+                    return float(m.group(1))
+                except ValueError:
+                    return None
+    return None
+
+
+def _extract_report_sections(markdown_text):
+    """Re-slice the Supervisor's own markdown report into labelled sections by
+    heading. This only reorganizes text the agents produced — it never invents
+    content. Falls back to a single 'conclusion' blob if no headings match.
+    """
+    if not markdown_text:
+        return {}
+    heading_map = [
+        (r"root\s*cause", "root_cause"),
+        (r"recommend|action|next step", "recommendation"),
+        (r"evidence|finding|analysis", "evidence"),
+        (r"verif|limitation|concern|caveat|uncertain", "limitations"),
+    ]
+    sections = {}
+    current = "conclusion"
+    for line in markdown_text.splitlines():
+        stripped = line.strip()
+        heading = re.match(r"^#{1,6}\s*(.+?)\s*#*$", stripped) or re.match(r"^\*\*(.+?)\*\*:?$", stripped)
+        if heading:
+            title = heading.group(1).lower()
+            current = "other"
+            for pattern, key in heading_map:
+                if re.search(pattern, title):
+                    current = key
+                    break
+            sections.setdefault(current, [])
+            continue
+        sections.setdefault(current, []).append(line)
+    return {k: "\n".join(v).strip() for k, v in sections.items() if "\n".join(v).strip()}
+
+
+# ---------------------------------------------------------------------------
+# Section 2 — humanized live workflow (st.status)
+# ---------------------------------------------------------------------------
+
+def _humanize_timeline(events):
+    """Fold raw events into concise, user-facing workflow steps."""
+    run, timeline = _group_events(events)
+    steps = []
+
+    if run["started"]:
+        p = run["started"]["payload"]
+        steps.append({
+            "state": "complete", "agent": "Supervisor",
+            "title": "Supervisor prepared the investigation plan",
+            "detail": f"{p.get('defect_type')} · last {p.get('days_back')} days "
+                      f"({p.get('window_start')} → {p.get('window_end')})",
+            "duration": None, "raw": run["started"],
+        })
+
+    for kind, entry in timeline:
+        if kind == "supervisor":
+            continue  # supervisor coordination is shown in the trace tab, not the concise feed
+        agent = _plain_agent_name(entry.get("agent_name"))
+        rows = _records_examined(entry.get("items", []))
+        tools = _tool_calls(entry.get("items", []))
+        status = entry.get("status")
+        state = {"completed": "complete", "failed": "failed", "running": "running"}.get(status, "running")
+        if state == "running":
+            title = f"{agent} is working…"
+        elif rows:
+            title = f"{agent} reviewed {rows:,} records"
+        elif tools:
+            title = f"{agent} ran {tools} check{'s' if tools != 1 else ''}"
+        else:
+            title = f"{agent} completed its step"
+        steps.append({
+            "state": state, "agent": agent, "title": title,
+            "detail": (entry.get("result_preview") or "").strip()[:180],
+            "duration": entry.get("duration_s"),
+            "error": entry.get("error"), "raw": entry,
+        })
+
+    if run["completed"]:
+        p = run["completed"]["payload"]
+        steps.append({
+            "state": "complete", "agent": "Supervisor",
+            "title": "Investigation complete — report generated",
+            "detail": p.get("pdf_filename", ""), "duration": p.get("duration_s"),
+            "raw": run["completed"],
+        })
+    elif run["failed"]:
+        steps.append({
+            "state": "failed", "agent": "Supervisor",
+            "title": "Investigation failed",
+            "detail": run["failed"]["payload"].get("error", ""),
+            "duration": None, "raw": run["failed"],
+        })
+    return run, steps
+
+
+_STATE_ICON = {
+    "complete": "✅", "running": "⏳", "failed": "❌",
+    "warning": "⚠️", "pending": "◻️", "approval": "🟡",
+}
+
+
+def render_live_workflow(events, running=True):
+    """Concise, human-readable workflow view built on st.status.
+
+    Used both as the live renderer during a run and as the collapsed post-run
+    summary. Raw events appear only when 'Show technical data' is enabled.
+    """
+    run, steps = _humanize_timeline(events)
+
+    if run.get("failed"):
+        label, state = "Investigation failed", "error"
+    elif run.get("completed"):
+        label, state = "Investigation complete", "complete"
+    elif running:
+        label, state = "Agents are investigating…", "running"
+    else:
+        label, state = "Investigation finished", "complete"
+
+    with st.status(label, state=state, expanded=bool(running)):
+        if not steps:
+            st.write("Preparing the investigation…")
+        for step in steps:
+            icon = _STATE_ICON.get(step["state"], "•")
+            duration = f" · {step['duration']}s" if step.get("duration") else ""
+            st.markdown(
+                f"{icon} **{step['title']}**  \n"
+                f"<span style='color:#6b7280;font-size:0.85em'>{step['agent']}{duration}</span>",
+                unsafe_allow_html=True,
             )
-        
-        # Show sharing info
-        st.info("🔗 This PDF is being viewed via a shareable URL. You can bookmark or share this link with others.")
-        return
-    
-    # Agent workflow overview. Tucked into a collapsed expander so the
-    # business user's first screen leads with the task (pick a defect, run),
-    # not the internals — but the teaching content stays one click away, with
-    # the same names and icons the live feed uses.
-    with st.expander("How the analysis works — the AI agent workflow", expanded=False):
-        st.markdown(
-            "A **Supervisor Agent** coordinates five specialist agents in sequence. "
-            "Each one queries the MES database and passes its findings to the next:"
+            if step.get("detail"):
+                st.caption(step["detail"])
+            if step.get("error"):
+                st.error(step["error"])
+            if st.session_state.get("show_technical_data"):
+                with st.expander("Raw event"):
+                    st.json(step.get("raw"))
+        if running and not run.get("completed") and not run.get("failed"):
+            st.caption("Working… this typically takes a few minutes.")
+
+
+# ---------------------------------------------------------------------------
+# Sidebar (settings only)
+# ---------------------------------------------------------------------------
+
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("### 🏭 MES Investigator")
+        st.caption("AthenaTech educational demo")
+        st.divider()
+
+        st.subheader("Settings")
+        st.toggle("Learning mode", key="learning_mode",
+                  help="Show short 'why this matters' explanations.")
+        st.toggle("Show technical data", key="show_technical_data",
+                  help="Reveal raw events, SQL and JSON throughout the app.")
+
+        model = os.getenv("MES_MODEL_ID")
+        if model:
+            st.caption(f"Model: `{model}`")
+
+        st.divider()
+        st.subheader("Current run")
+        if st.session_state.get("analysis_running"):
+            st.info("⏳ Investigation running…")
+        elif st.session_state.get("run_error"):
+            st.error("❌ Last run failed")
+        elif st.session_state.get("analysis_started"):
+            st.success("✅ Investigation complete")
+        else:
+            st.caption("No active investigation")
+
+        if st.button("Reset current investigation", use_container_width=True,
+                     key="reset_investigation"):
+            for key in ["analysis_started", "selected_defect", "defect_select",
+                        "show_final_analysis", "agent_event_log", "work_pending",
+                        "analysis_running", "run_error", "approval_state",
+                        "user_question", "run_params"]:
+                st.session_state.pop(key, None)
+            st.session_state.current_analysis = {}
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Section 1 — choose an investigation
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=300)
+def get_defect_example_record(defect_type: str):
+    """One real, most-recent record of this defect type, for the case preview.
+
+    The workflow analyzes a defect *type*, so this shows a representative record
+    (id, machine, line, severity, detection time) drawn live from the database.
+    Read-only, parameterized, fail-open.
+    """
+    manager = get_agent_manager()
+    if manager is None or not defect_type:
+        return None
+    try:
+        result = manager._execute_safe_query(
+            """SELECT d.DefectID AS DefectID, d.Severity AS Severity,
+                      qc.Date AS DetectedAt, m.Name AS Machine, wc.Name AS Line
+               FROM Defects d
+               JOIN QualityControl qc ON d.CheckID = qc.CheckID
+               LEFT JOIN WorkOrders wo ON qc.OrderID = wo.OrderID
+               LEFT JOIN Machines m ON wo.MachineID = m.MachineID
+               LEFT JOIN WorkCenters wc ON m.WorkCenterID = wc.WorkCenterID
+               WHERE d.DefectType = ?
+               ORDER BY date(qc.Date) DESC LIMIT 1""",
+            (defect_type,), purpose="Most recent example record for the case preview")
+        if result.get("success") and result.get("rows"):
+            return result["rows"][0]
+    except Exception as e:
+        logger.warning(f"Example record lookup failed: {e}")
+    return None
+
+
+def render_selected_case_preview(defect_type: str):
+    """Compact preview of the selected case before execution."""
+    record = get_defect_example_record(defect_type)
+    with st.container(border=True):
+        st.markdown(f"**Selected case — {defect_type}**")
+        if record:
+            detected = str(record.get("DetectedAt") or "")[:16]
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"**Defect ID**\n\n{record.get('DefectID', '—')}")
+            c1.markdown(f"**Defect type**\n\n{defect_type}")
+            c2.markdown(f"**Machine**\n\n{record.get('Machine') or '—'}")
+            c2.markdown(f"**Production line**\n\n{record.get('Line') or '—'}")
+            c3.markdown(f"**Severity**\n\n{record.get('Severity', '—')}/5")
+            c3.markdown(f"**Detected**\n\n{detected or '—'}")
+            st.caption("Shown: most recent record of this type. The investigation "
+                       "analyzes the defect type across the selected look-back window.")
+        else:
+            st.caption("No example record available for this defect type yet.")
+
+
+def render_investigation_form():
+    """Section 1: choose a defect/record or ask a question, then run."""
+    with st.container(border=True):
+        st.markdown("### 1 · Choose an investigation")
+
+        # Mode selector and live inputs live outside the form so the case
+        # preview can update immediately; the form submits scope + run together.
+        st.radio(
+            "How would you like to start?",
+            options=["record", "question"],
+            format_func=lambda m: "Select a defect record" if m == "record"
+            else "Ask an investigation question",
+            horizontal=True, key="investigation_mode",
         )
-        col1, col2, col3, col4, col5 = st.columns(5)
 
-        with col1:
-            st.markdown("""
-            **📡 Monitor**
+        defect_types = st.session_state.get("defect_types") or []
+        if not defect_types:
+            with st.spinner("Loading defect types…"):
+                defect_types = load_defect_types(365)
+                st.session_state.defect_types = defect_types
 
-            - Captures OEE drops
-            - Fetches context data
-            - Historical patterns
-            - Operator & work-order logs
-            """)
+        if not defect_types:
+            st.warning("No defect types are available. Check the database connection.")
+            return
 
-        with col2:
-            st.markdown("""
-            **🔬 Analyzer**
+        options = [None] + defect_types
+        previous = st.session_state.get("selected_defect")
 
-            - Root-cause identification
-            - Correlation analysis
-            - Performance reasoning
-            - Certainty ratings
-            """)
-
-        with col3:
-            st.markdown("""
-            **📋 Planner**
-
-            - Actionable plans
-            - PDF report creation
-            - Implementation roadmap
-            - Success metrics
-            """)
-
-        with col4:
-            st.markdown("""
-            **✅ Verifier**
-
-            - Finding validation
-            - Quality assurance
-            """)
-
-        with col5:
-            st.markdown("""
-            **📧 Executor**
-
-            - Email notification (dry run)
-            - Routes to human review
-            """)
-
-    st.divider()
-    
-    # Get sidebar configuration
-    config = render_sidebar_configuration()
-    selected_defect = config['selected_defect']
-    
-    # Check if PDF viewer should be shown (session state)
-    if 'selected_pdf' in st.session_state:
-        st.subheader(f"📄 PDF Report Viewer: {st.session_state.selected_pdf.name}")
-        
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("❌ Close Viewer"):
-                del st.session_state.selected_pdf
-                st.rerun()
-        
-        pdf_data = display_pdf_viewer(st.session_state.selected_pdf)
-        if pdf_data:
-            st.download_button(
-                "📥 Download This Report",
-                data=pdf_data,
-                file_name=st.session_state.selected_pdf.name,
-                mime="application/pdf"
+        if st.session_state.investigation_mode == "question":
+            st.text_area(
+                "Your investigation question",
+                placeholder="e.g. Why did waterproofing failures rise last week?",
+                key="user_question",
             )
-        return
-    
-    # Charts-first operational overview (real MES data), shown above the
-    # defect workspace so the page opens with the situational picture.
-    render_overview_dashboard()
+            st.caption("The engine investigates a specific defect type — pick the "
+                       "one your question is about.")
 
-    # Main content area
-    if selected_defect:
-        # Show detailed defect preview in main area
-        st.subheader(f"📊 Defect Analysis: {selected_defect}")
-        with st.expander("Detailed Defect Information", expanded=True):
-            render_defect_preview(selected_defect)
-        
-        if "analysis_running" not in st.session_state:
-            st.session_state.analysis_running = False
-
-        run_clicked = st.button(
-            "🚀 Run Analysis",
+        chosen = st.selectbox(
+            "Defect type" if st.session_state.investigation_mode == "record"
+            else "Which defect does this concern?",
+            options=options,
+            index=options.index(previous) if previous in options else 0,
+            format_func=lambda x: "— Select a defect type —" if x is None else x,
             disabled=st.session_state.analysis_running,
-            use_container_width=True
+            key="defect_select",
         )
+        st.session_state.selected_defect = chosen
 
-        if run_clicked and not st.session_state.analysis_running:
-            # One cheap COUNT query before committing five agents and
-            # minutes of wall-clock to a window that holds no data.
+        if chosen:
+            render_selected_case_preview(chosen)
+
+        with st.form("investigation_form"):
+            st.markdown("**Look-back window & scope**")
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                time_option = st.selectbox(
+                    "Look-back period",
+                    ["Last 3 days", "Last 7 days", "Last 14 days", "Last 30 days",
+                     "Last 120 days", "Last 180 days", "Last 365 days"],
+                    index=1, key="lookback_select",
+                )
+            with col2:
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                include_oee = sc1.checkbox("OEE", value=False, key="scope_oee")
+                include_downtime = sc2.checkbox("Downtime", value=False, key="scope_downtime")
+                include_changeover = sc3.checkbox("Changeover", value=False, key="scope_changeover")
+                include_maintenance = sc4.checkbox("Maintenance", value=True, key="scope_maintenance")
+
+            submitted = st.form_submit_button(
+                "Run Investigation →", type="primary", use_container_width=True,
+                disabled=st.session_state.analysis_running,
+            )
+
+        if submitted:
+            if not st.session_state.selected_defect:
+                st.warning("Please choose a defect type to investigate.")
+                return
+            days_back = int(time_option.split()[1])
             window_ok, window_warning = check_analysis_window(
-                selected_defect, config['days_back'])
+                st.session_state.selected_defect, days_back)
             if not window_ok:
                 st.warning(window_warning)
-            else:
-                st.session_state.analysis_running = True
-                st.session_state.work_pending = True
-                st.session_state.show_final_analysis = False
-                st.rerun()
-
-        if st.session_state.analysis_running and st.session_state.get("work_pending"):
-            st.session_state.work_pending = False
-            try:
-                st.divider()
-                st.subheader(f"🔄 Analyzing Defect Type: {selected_defect}")
-
-                analysis_results = run_defect_analysis(
-                    defect_type=selected_defect,
-                    days_back=config['days_back'],
-                    include_oee=config['include_oee'],
-                    include_downtime=config['include_downtime'],
-                    include_changeover=config['include_changeover'],
-                    include_maintenance=config['include_maintenance']
-                )
-
-                if analysis_results:
-                    logger.info(
-                        "Analysis completed. PDF: %s",
-                        analysis_results.get("pdf_filename"),
-                    )
-            finally:
-                st.session_state.analysis_running = False
-                st.rerun()
-
-    # Results render independently of the selectbox so a rerun where the
-    # widget lost its selection (e.g. returning from the PDF viewer) doesn't
-    # wipe the completed analysis from view. After a run the finished live
-    # feed stays on screen (also for failed runs, whose error would
-    # otherwise be wiped by the rerun) until the reader asks for the
-    # final analysis — no jump-cut from feed to results.
-    finished_events = st.session_state.get("agent_event_log") or []
-    has_results = st.session_state.analysis_started and st.session_state.current_analysis
-    if has_results and st.session_state.get("show_final_analysis"):
-        render_analysis_results()
-    elif finished_events and not st.session_state.get("analysis_running"):
-        st.subheader("🔍 Agent activity — completed run")
-        render_live_feed(finished_events, running=False)
-        if has_results and st.button(
-            "📊 Show final analysis", type="primary", use_container_width=True
-        ):
-            st.session_state.show_final_analysis = True
+                return
+            st.session_state.run_params = {
+                "days_back": days_back,
+                "include_oee": include_oee,
+                "include_downtime": include_downtime,
+                "include_changeover": include_changeover,
+                "include_maintenance": include_maintenance,
+            }
+            st.session_state.analysis_running = True
+            st.session_state.work_pending = True
+            st.session_state.analysis_started = False
+            st.session_state.current_analysis = {}
+            st.session_state.approval_state = None
+            st.session_state.pop("run_error", None)
             st.rerun()
-    elif not selected_defect:
-        # Show welcome message
-        st.info("👈 Please select a defect type from the sidebar to begin analysis")
-                
-def render_analysis_results():
-    """Render comprehensive analysis results"""
-    
-    analysis = st.session_state.current_analysis
-    defect_type = analysis.get('defect_type', 'Unknown')
-    
-    st.divider()
-    st.subheader(f"📊 Analysis Results: {defect_type}")
 
+
+# ---------------------------------------------------------------------------
+# Section 3 — investigation result (conclusion before technical detail)
+# ---------------------------------------------------------------------------
+
+def render_result_summary(analysis):
+    """The plain-language conclusion and headline metrics."""
+    markdown_text = analysis.get("supervisor_orchestration") or ""
+    sections = _extract_report_sections(markdown_text)
+    events = st.session_state.get("agent_event_log") or []
+
+    st.markdown("#### Most likely root cause")
+    with st.container(border=True):
+        st.markdown(sections.get("root_cause") or sections.get("conclusion")
+                    or markdown_text or "_No conclusion text was returned._")
+
+    recommendation = sections.get("recommendation")
+    if recommendation:
+        st.markdown("#### Recommended action")
+        with st.container(border=True):
+            st.markdown(recommendation)
+
+    limitations = sections.get("limitations")
+    if limitations:
+        st.markdown("#### Verifier concerns & limitations")
+        with st.container(border=True):
+            st.markdown(limitations)
+
+    # Four bordered metric tiles (short values only).
+    confidence = _confidence_from_events(events)
+    tiles = [
+        ("Confidence", f"{confidence * 100:.0f}%" if confidence is not None else "Not scored"),
+        ("Records examined", f"{_records_examined(events):,}"),
+        ("Tool calls", f"{_tool_calls(events)}"),
+        ("Total runtime", f"{analysis.get('total_duration', 0):.1f}s"),
+    ]
+    cols = st.columns(4)
+    for col, (label, value) in zip(cols, tiles):
+        with col:
+            with st.container(border=True):
+                st.metric(label, value)
+
+
+# ---------------------------------------------------------------------------
+# Human approval (st.dialog)
+# ---------------------------------------------------------------------------
+
+@st.dialog("Human approval required")
+def _approval_dialog(analysis):
+    sections = _extract_report_sections(analysis.get("supervisor_orchestration") or "")
     pdf_filename = analysis.get("pdf_filename")
-    pdf_path = REPORTS_DIR / pdf_filename if pdf_filename else None
 
-    if pdf_path and pdf_path.exists():
-        st.success(f"📄 Report generated: {pdf_filename}")
+    st.markdown("**Proposed action**")
+    with st.container(border=True):
+        st.markdown(sections.get("recommendation")
+                    or "Review the generated report and approve the recommended plan.")
 
-        with open(pdf_path, "rb") as pdf_file:
-            pdf_data = pdf_file.read()
+    if sections.get("evidence"):
+        st.markdown("**Supporting evidence**")
+        with st.container(border=True):
+            st.markdown(sections["evidence"][:1200])
 
-        report_col1, report_col2 = st.columns(2)
+    st.warning("Possible operational consequence: approving authorizes the "
+               "recommended plan and notifications for this defect. The demo "
+               "email step runs in dry-run mode.")
 
-        with report_col1:
-            st.download_button(
-                label="📥 Download PDF Report",
-                data=pdf_data,
-                file_name=pdf_filename,
-                mime="application/pdf",
-                use_container_width=True,
-            )
-
-        with report_col2:
-            if st.button(
-                "👁️ View PDF Report",
-                key=f"view_{pdf_filename}",
-                use_container_width=True,
-            ):
-                st.query_params["pdf"] = pdf_filename
-                st.rerun()
-    else:
-        st.error(
-            "The analysis is available, but its PDF report cannot be found."
-        )
-
-    # Results overview
-    col1, col2, col3, col4 = st.columns(4)
-    
-    duration = analysis.get('total_duration', 0)
-    analysis_scope = analysis.get('analysis_scope', {})
-    scope_summary = analysis_scope.get('scope_summary', 'Basic Analysis')
-    
-    with col1:
-        st.metric("Defect Type", defect_type)
-    with col2:
-        st.metric("Analysis Duration", f"{duration:.1f}s")
-    with col3:
-        st.metric("Agents Executed", "5/5", "✅")
-    with col4:
-        st.metric("Analysis Scope", scope_summary)
-    
-    # Show analysis scope details
-    if analysis_scope:
-        scope_details = []
-        if analysis_scope.get('include_oee'):
-            scope_details.append("🔍 OEE Analysis")
-        if analysis_scope.get('include_downtime'):
-            scope_details.append("⏱️ Downtime Analysis")
-        if analysis_scope.get('include_changeover'):
-            scope_details.append("🔄 Changeover Analysis")
-        if analysis_scope.get('include_maintenance'):
-            scope_details.append("🔧 Maintenance Analysis")
-        
-        if scope_details:
-            st.info(f"**Enabled Analysis Areas:** {' • '.join(scope_details)}")
-    
-    # Create tabs for detailed results
-    tab2, tab3, tab4 = st.tabs([
-        "📊 Executive Summary",
-        "📈 Performance Metrics",
-        "🔬 Under the Hood"
-    ])
-
-    with tab2:
-        render_executive_summary(analysis)
-
-    with tab3:
-        render_performance_metrics(analysis)
-
-    with tab4:
-        event_log = st.session_state.get("agent_event_log")
-        if event_log:
-            render_trace(event_log)
-        else:
-            st.info(
-                "No event trace is available for this analysis. "
-                "Run a new analysis to watch the agent workflow step by step."
-            )
-
-def render_performance_metrics(analysis):
-    """Render real, traceable facts about the run.
-
-    Deliberately shows only numbers we can stand behind (timing, scope,
-    look-back window). Projected reductions, ROI, and confidence scores are
-    NOT invented here — the actual quantified findings come from the agents'
-    SQL analysis and live in the generated PDF report.
-    """
-
-    st.subheader("📈 Run Details")
-
-    analysis_scope = analysis.get('analysis_scope', {})
-
+    reason = st.text_input("Optional note / rejection reason", key="approval_reason")
     col1, col2 = st.columns(2)
+    if col1.button("✅ Approve", type="primary", use_container_width=True, key="approve_btn"):
+        if pdf_filename:
+            record_report_decision(pdf_filename, "approved")
+        st.session_state.approval_state = {"decision": "approved", "reason": reason}
+        st.rerun()
+    if col2.button("❌ Reject", use_container_width=True, key="reject_btn"):
+        if pdf_filename:
+            record_report_decision(pdf_filename, "rejected")
+        st.session_state.approval_state = {"decision": "rejected", "reason": reason}
+        st.rerun()
 
-    with col1:
-        st.markdown("**How this analysis ran**")
 
-        duration = analysis.get('total_duration', 0)
-        st.metric("Total Analysis Time", f"{duration:.1f}s")
+def render_approval_section(analysis):
+    """Approval gate. Reads any prior decision from the persistent log."""
+    pdf_filename = analysis.get("pdf_filename")
+    prior = load_report_decisions().get(pdf_filename or "", {})
+    decision = (st.session_state.get("approval_state") or {}).get("decision") or prior.get("decision")
 
-        enabled_count = sum([
-            analysis_scope.get('include_oee', False),
-            analysis_scope.get('include_downtime', False),
-            analysis_scope.get('include_changeover', False),
-            analysis_scope.get('include_maintenance', False),
-        ])
-        st.metric("Analysis Areas Covered", f"{enabled_count} of 4")
-        st.metric("Look-back Window", f"{analysis.get('analysis_period', 7)} days")
+    with st.container(border=True):
+        st.markdown("#### Human approval")
+        if decision == "approved":
+            st.success("✅ This plan was **approved**.")
+        elif decision == "rejected":
+            st.error("❌ This plan was **rejected**.")
+        else:
+            st.warning("This plan is **awaiting human approval** before it is actioned.")
+            if st.button("Review & approve →", type="primary", key="open_approval"):
+                _approval_dialog(analysis)
 
-    with col2:
-        st.markdown("**Where the findings are**")
-        st.info(
-            "The root causes, quantified impact, and recommended actions for "
-            "this defect are in the **PDF report** — every number there is "
-            "computed from the MES database by the agents, not estimated here.\n\n"
-            "Open it from the **Executive Summary** tab or the sidebar's "
-            "**Available Reports** list."
-        )
 
-def render_executive_summary(analysis):
-    """Executive summary: what was analyzed, and a direct route to the report.
+# ---------------------------------------------------------------------------
+# Section 4 — inspection tabs
+# ---------------------------------------------------------------------------
 
-    The validated findings and recommended actions are produced by the agents
-    and written into the PDF (traceable to SQL). This tab summarizes the run's
-    real parameters and puts the report one click away — it does not restate or
-    invent findings the app can't verify here.
-    """
+def render_summary_tab(analysis):
+    sections = _extract_report_sections(analysis.get("supervisor_orchestration") or "")
+    events = st.session_state.get("agent_event_log") or []
+    st.markdown("**Conclusion**")
+    st.markdown(sections.get("root_cause") or sections.get("conclusion")
+                or analysis.get("supervisor_orchestration") or "_No conclusion._")
+    if sections.get("evidence"):
+        st.markdown("**Key evidence**")
+        st.markdown(sections["evidence"])
+    if sections.get("recommendation"):
+        st.markdown("**Recommended action**")
+        st.markdown(sections["recommendation"])
+    confidence = _confidence_from_events(events)
+    st.markdown(f"**Confidence:** {f'{confidence*100:.0f}%' if confidence is not None else 'Not scored'}")
+    if sections.get("limitations"):
+        st.markdown("**Limitations**")
+        st.markdown(sections["limitations"])
 
-    defect_type = analysis.get('defect_type', 'Unknown')
-    analysis_scope = analysis.get('analysis_scope', {})
 
-    st.subheader("📋 Executive Summary")
+def render_evidence_tab(analysis):
+    st.caption("Evidence drawn from the MES database during and around this "
+               "investigation, grouped by source.")
+    defect_type = analysis.get("defect_type")
 
-    # Parse end_time safely
-    end_time_str = analysis.get('end_time', '')
-    if end_time_str:
-        try:
-            end_time_formatted = datetime.fromisoformat(end_time_str).strftime('%Y-%m-%d %H:%M')
-        except (ValueError, TypeError):
-            end_time_formatted = end_time_str
-    else:
-        end_time_formatted = datetime.now().strftime('%Y-%m-%d %H:%M')
+    st.markdown("**Defect records**")
+    if defect_type:
+        render_defect_preview(defect_type)
 
-    scope_summary = analysis_scope.get('scope_summary', 'Basic Analysis')
+    st.markdown("**Production trends**")
+    render_overview_dashboard()
 
-    enabled_areas = []
-    if analysis_scope.get('include_oee'):
-        enabled_areas.append("OEE performance")
-    if analysis_scope.get('include_downtime'):
-        enabled_areas.append("downtime & stoppages")
-    if analysis_scope.get('include_changeover'):
-        enabled_areas.append("batch changeover")
-    if analysis_scope.get('include_maintenance'):
-        enabled_areas.append("maintenance correlation")
-    areas_text = ", ".join(enabled_areas) if enabled_areas else "basic operational review"
+    events = st.session_state.get("agent_event_log") or []
+    queried = _records_examined(events)
+    st.caption(f"During this run the agents examined {queried:,} records across "
+               f"{_tool_calls(events)} tool calls — see the SQL & Tools tab for each query.")
 
-    st.markdown(f"""
-    **What was analyzed**
-    - **Defect type:** {defect_type}
-    - **Look-back period:** {analysis.get('analysis_period', 7)} days
-    - **Focus areas:** {areas_text}
-    - **Completed:** {end_time_formatted}
-    """)
 
-    st.markdown("**Your report**")
+def render_sql_tools_tab(events):
+    """One collapsed expander per tool call. SQL never expanded by default."""
+    completed = {}
+    sql_by_tool = {}
+    tool_starts = []
+    for e in events:
+        etype = e.get("type")
+        payload = e.get("payload") or {}
+        if etype == "tool_started":
+            name = str(payload.get("tool_name", ""))
+            if not name.startswith("call_"):
+                tool_starts.append(e)
+        elif etype == "tool_completed":
+            completed[payload.get("tool_use_id")] = e
+        elif etype in ("sql_executed", "sql_failed") and payload.get("tool_use_id"):
+            sql_by_tool.setdefault(payload["tool_use_id"], []).append(e)
+
+    if not tool_starts:
+        st.info("No tool calls were recorded for this run.")
+        return
+
+    for e in tool_starts:
+        payload = e.get("payload") or {}
+        name = payload.get("tool_name")
+        tuid = payload.get("tool_use_id")
+        done = completed.get(tuid, {})
+        done_payload = done.get("payload") or {}
+        sql_events = sql_by_tool.get(tuid, [])
+        rows = None
+        exec_ms = None
+        for se in sql_events:
+            sp = se.get("payload") or {}
+            rows = sp.get("row_count") if rows is None else rows
+            exec_ms = sp.get("execution_time_ms") if exec_ms is None else exec_ms
+        ok = done_payload.get("status") != "error"
+        mark = "✓" if ok else "✕"
+        bits = [f"{mark} {name}"]
+        if rows is not None:
+            bits.append(f"{rows} rows")
+        duration = done_payload.get("duration_ms")
+        if duration is not None:
+            bits.append(f"{duration} ms")
+        with st.expander(" — ".join(bits)):
+            args = payload.get("arguments")
+            st.markdown(f"**Tool:** `{name}`")
+            if not ok and done_payload.get("error"):
+                st.error(done_payload["error"])
+            if args:
+                st.markdown("**Arguments**")
+                st.json(args) if isinstance(args, (dict, list)) else st.write(args)
+            for se in sql_events:
+                sp = se.get("payload") or {}
+                if sp.get("purpose"):
+                    st.caption(f"Purpose: {sp['purpose']}")
+                st.code(sp.get("sql", ""), language="sql")
+                st.caption(f"Params: {sp.get('params') or '—'} · "
+                           f"{sp.get('row_count')} rows · {sp.get('execution_time_ms')} ms "
+                           f"· read-only validated")
+
+
+def render_agent_trace_tab(events):
+    """One collapsed expander per agent, chronologically. Raw JSON is tucked
+    into a single final expander."""
+    run, timeline = _group_events(events)
+    activations = [entry for kind, entry in timeline if kind == "activation"]
+    if not activations:
+        st.info("No agent activity was recorded for this run.")
+    for entry in activations:
+        agent = _plain_agent_name(entry.get("agent_name"))
+        status = entry.get("status")
+        mark = "✓" if status == "completed" else ("✕" if status == "failed" else "…")
+        duration = entry.get("duration_s")
+        label = f"{mark} {agent}" + (f" — {duration} seconds" if duration else "")
+        with st.expander(label):
+            if entry.get("prompt"):
+                st.markdown("**Goal / input received**")
+                st.markdown("> " + str(entry["prompt"]).strip().replace("\n", "\n> "))
+            rows = _records_examined(entry.get("items", []))
+            tools = _tool_calls(entry.get("items", []))
+            st.markdown(f"**Tools called:** {tools} · **records examined:** {rows:,}")
+            if entry.get("result_preview"):
+                st.markdown("**Output / conclusion**")
+                st.markdown(entry["result_preview"])
+            if entry.get("error"):
+                st.error(entry["error"])
+            footer = _metrics_caption(entry.get("metrics"))
+            if footer:
+                st.caption(footer)
+
+    with st.expander("Raw event data"):
+        st.json(events)
+
+
+def render_report_tab(analysis):
     pdf_filename = analysis.get("pdf_filename")
     pdf_path = REPORTS_DIR / pdf_filename if pdf_filename else None
+
     if pdf_path and pdf_path.exists():
-        st.markdown(
-            "The full root-cause analysis and recommended actions for "
-            f"**{defect_type}** are in the generated report. Every figure in it "
-            "is computed from the MES database by the agents."
-        )
-        with open(pdf_path, "rb") as pdf_file:
-            pdf_bytes = pdf_file.read()
+        st.success(f"Report generated: {pdf_filename}")
+        markdown_text = analysis.get("supervisor_orchestration") or ""
+        preview = "\n".join(markdown_text.splitlines()[:12]).strip()
+        if preview:
+            st.markdown("**Preview**")
+            with st.container(border=True):
+                st.markdown(preview)
+        with open(pdf_path, "rb") as handle:
+            pdf_bytes = handle.read()
         col1, col2 = st.columns(2)
         with col1:
-            st.download_button(
-                "📥 Download report (PDF)",
-                data=pdf_bytes,
-                file_name=pdf_filename,
-                mime="application/pdf",
-                use_container_width=True,
-                key="exec_download_pdf",
-            )
+            st.download_button("📥 Download PDF Report", data=pdf_bytes,
+                               file_name=pdf_filename, mime="application/pdf",
+                               use_container_width=True, key="report_download")
         with col2:
-            if st.button("👁️ View report", use_container_width=True, key="exec_view_pdf"):
+            if st.button("👁️ View report", use_container_width=True, key="report_view"):
                 st.query_params["pdf"] = pdf_filename
                 st.rerun()
     else:
-        st.info(
-            "The report file could not be found. Re-run the analysis to "
-            "regenerate it."
-        )
+        st.error("The report file could not be found. Re-run the investigation to regenerate it.")
 
-def main():
-    """Main function to run the MES dashboard"""
-    
-    st.set_page_config(
-        page_title="MES Quality Management",
-        page_icon="🏭",
-        layout="wide",
-        initial_sidebar_state="expanded"
+
+def render_inspection_tabs(analysis, events):
+    summary_tab, evidence_tab, sql_tab, trace_tab, report_tab = st.tabs(
+        ["Summary", "Evidence", "SQL & Tools", "Agent Trace", "Report"])
+    with summary_tab:
+        render_summary_tab(analysis)
+    with evidence_tab:
+        render_evidence_tab(analysis)
+    with sql_tab:
+        render_sql_tools_tab(events)
+    with trace_tab:
+        render_agent_trace_tab(events)
+    with report_tab:
+        render_report_tab(analysis)
+
+
+# ---------------------------------------------------------------------------
+# Empty and error states
+# ---------------------------------------------------------------------------
+
+def render_empty_state():
+    with st.container(border=True):
+        st.markdown("#### New here? It takes three steps")
+        st.markdown(
+            "1. **Choose** a defect type above.\n"
+            "2. **Run** the investigation and watch the agents work.\n"
+            "3. **Read** the conclusion, inspect the evidence, then approve and download the report."
+        )
+        st.caption("Sample defects to try: " + " · ".join(SAMPLE_INVESTIGATIONS))
+
+
+def render_error_state():
+    with st.container(border=True):
+        st.error(st.session_state.get("run_error")
+                 or "Something went wrong during the investigation.")
+        col1, col2 = st.columns(2)
+        if col1.button("Retry", type="primary", use_container_width=True, key="retry_run"):
+            st.session_state.pop("run_error", None)
+            if st.session_state.get("selected_defect") and st.session_state.get("run_params"):
+                st.session_state.analysis_running = True
+                st.session_state.work_pending = True
+            st.rerun()
+        if col2.button("Reset", use_container_width=True, key="reset_after_error"):
+            for key in ["run_error", "agent_event_log", "analysis_running", "work_pending",
+                        "analysis_started", "run_params"]:
+                st.session_state.pop(key, None)
+            st.session_state.current_analysis = {}
+            st.rerun()
+        with st.expander("Technical details"):
+            st.write(st.session_state.get("run_error"))
+
+
+# ---------------------------------------------------------------------------
+# Pages
+# ---------------------------------------------------------------------------
+
+def render_investigate_page():
+    st.markdown("## 🔎 Investigate")
+
+    render_investigation_form()
+
+    # Execute a pending run under the one-shot guard (agents are not
+    # re-entrant — this preserves the existing non-reentrancy pattern).
+    if st.session_state.get("analysis_running") and st.session_state.get("work_pending"):
+        st.session_state.work_pending = False
+        params = st.session_state.get("run_params", {})
+        st.markdown("### 2 · Agent workflow")
+        try:
+            run_defect_analysis(
+                defect_type=st.session_state.selected_defect,
+                days_back=params.get("days_back", 7),
+                include_oee=params.get("include_oee", False),
+                include_downtime=params.get("include_downtime", False),
+                include_changeover=params.get("include_changeover", False),
+                include_maintenance=params.get("include_maintenance", True),
+                render_fn=render_live_workflow,
+            )
+        finally:
+            st.session_state.analysis_running = False
+            st.rerun()
+        return
+
+    events = st.session_state.get("agent_event_log") or []
+
+    if st.session_state.get("run_error"):
+        st.markdown("### 2 · Agent workflow")
+        if events:
+            render_live_workflow(events, running=False)
+        render_error_state()
+        return
+
+    if st.session_state.get("analysis_started") and st.session_state.get("current_analysis"):
+        analysis = st.session_state.current_analysis
+        st.markdown("### 2 · Agent workflow")
+        render_live_workflow(events, running=False)
+        st.markdown("### 3 · Investigation result")
+        render_result_summary(analysis)
+        render_approval_section(analysis)
+        st.markdown("### 4 · Inspect the investigation")
+        render_inspection_tabs(analysis, events)
+    elif not st.session_state.get("analysis_running"):
+        render_empty_state()
+
+
+def _load_run_history():
+    """Read persisted runs from runs/<id>/ for the history table."""
+    rows = []
+    if not RUNS_DIR.exists():
+        return rows
+    for run_dir in sorted(RUNS_DIR.glob("*/"), reverse=True):
+        params_file = run_dir / "params.json"
+        if not params_file.exists():
+            continue
+        try:
+            params = json.loads(params_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        status, runtime, root_cause = "unknown", None, "—"
+        events_file = run_dir / "events.jsonl"
+        if events_file.exists():
+            try:
+                events = [json.loads(line) for line in
+                          events_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+                run, _ = _group_events(events)
+                if run.get("completed"):
+                    status = "completed"
+                    runtime = run["completed"]["payload"].get("duration_s")
+                elif run.get("failed"):
+                    status = "failed"
+            except Exception:
+                pass
+        rows.append({
+            "Status": status,
+            "Investigation": params.get("defect_type", "—"),
+            "Machine": "—",
+            "Root cause": root_cause,
+            "Confidence": "—",
+            "Started": params.get("started", "—"),
+            "Runtime": f"{runtime:.1f}s" if isinstance(runtime, (int, float)) else "—",
+            "_dir": str(run_dir),
+        })
+    return rows
+
+
+def render_history_page():
+    st.markdown("## 🗂 Run History")
+    rows = _load_run_history()
+    if not rows:
+        st.info("No previous runs found yet. Completed investigations will appear here.")
+        return
+
+    df = pd.DataFrame(rows)
+
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        statuses = ["All"] + sorted(df["Status"].unique().tolist())
+        status_filter = st.selectbox("Status", statuses, key="hist_status")
+    with f2:
+        machines = ["All"] + sorted(df["Machine"].unique().tolist())
+        machine_filter = st.selectbox("Machine", machines, key="hist_machine")
+    with f3:
+        date_filter = st.text_input("Started on/after (YYYY-MM-DD)", key="hist_date")
+
+    view = df.copy()
+    if status_filter != "All":
+        view = view[view["Status"] == status_filter]
+    if machine_filter != "All":
+        view = view[view["Machine"] == machine_filter]
+    if date_filter.strip():
+        view = view[view["Started"].astype(str) >= date_filter.strip()]
+
+    display_cols = ["Status", "Investigation", "Machine", "Root cause",
+                    "Confidence", "Started", "Runtime"]
+    selection = st.dataframe(
+        view[display_cols], use_container_width=True, hide_index=True,
+        on_select="rerun", selection_mode="single-row", key="history_table",
     )
 
-    inject_theme()
+    selected_rows = selection.get("selection", {}).get("rows", []) if selection else []
+    if selected_rows:
+        record = view.iloc[selected_rows[0]]
+        st.session_state.selected_history_row = record.get("_dir")
+        with st.container(border=True):
+            st.markdown(f"**{record['Investigation']}** — {record['Status']}")
+            st.caption(f"Started {record['Started']} · runtime {record['Runtime']}")
+            st.caption(f"Run folder: `{record['_dir']}`")
 
-    render_main_dashboard()
+
+def render_learning_page():
+    st.markdown("## 📘 How It Works")
+    st.markdown(
+        "A **Supervisor** agent orchestrates specialist agents to investigate a "
+        "manufacturing defect, grounding every claim in read-only database "
+        "queries, then a **Verifier** checks the findings before a human approves "
+        "the plan and a report is produced."
+    )
+
+    st.graphviz_chart("""
+    digraph {
+        rankdir=LR;
+        node [shape=box, style="rounded,filled", fillcolor="#EFF4FF", color="#2563EB", fontname="sans-serif"];
+        User -> Supervisor;
+        Supervisor -> "Specialist Agents";
+        "Specialist Agents" -> Verifier;
+        Verifier -> "Human Approval";
+        "Human Approval" -> "Final Report";
+    }
+    """)
+
+    points = [
+        ("Supervisor orchestration",
+         "The Supervisor plans the workflow and delegates to specialist agents, one phase at a time."),
+        ("Read-only tools",
+         "Agents query the MES database through parameterized, read-only tools — they cannot modify data."),
+        ("Visible SQL",
+         "Every database query, its parameters, row counts and timing are shown in the SQL & Tools tab."),
+        ("Evidence grounding",
+         "Counts and correlations come from SQL, not from the model, so conclusions trace to real records."),
+        ("Verification",
+         "A Verifier agent reviews the findings before they are presented as conclusions."),
+        ("Human approval",
+         "A person approves or rejects the recommended plan; the decision is recorded in the report log."),
+    ]
+    for title, body in points:
+        with st.container(border=True):
+            st.markdown(f"**{title}**")
+            st.markdown(body)
+            if st.session_state.get("learning_mode"):
+                st.caption("Why this matters: it keeps the investigation auditable — "
+                           "a reader can trace every conclusion back to the data and the human sign-off.")
+
+
+def render_shared_pdf(pdf_path):
+    """Standalone viewer for a report opened via a shared ?pdf= link."""
+    st.markdown(f"## 📄 {pdf_path.name}")
+    decision = load_report_decisions().get(pdf_path.name)
+    if decision:
+        verdict = "approved ✅" if decision.get("decision") == "approved" else "rejected ❌"
+        st.info(f"Human review: this plan was **{verdict}** on {decision.get('at')}.")
+    col1, col2, col3 = st.columns([2, 2, 1])
+    if col1.button("✅ Approve plan", key="shared_approve"):
+        record_report_decision(pdf_path.name, "approved")
+        st.rerun()
+    if col2.button("❌ Reject plan", key="shared_reject"):
+        record_report_decision(pdf_path.name, "rejected")
+        st.rerun()
+    if col3.button("✖ Close", key="shared_close"):
+        st.query_params.clear()
+        st.rerun()
+    pdf_data = display_pdf_viewer(pdf_path)
+    if pdf_data:
+        st.download_button("📥 Download This Report", data=pdf_data,
+                           file_name=pdf_path.name, mime="application/pdf",
+                           key="shared_download")
+
+
+def main():
+    """Guided investigation workspace."""
+    st.set_page_config(
+        page_title="MES Quality Investigator",
+        page_icon="🏭",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    init_session_state()
+
+    # Shared-link report viewer works from any entry point.
+    url_pdf = get_pdf_from_url()
+    if url_pdf is not None:
+        render_sidebar()
+        render_shared_pdf(url_pdf)
+        return
+
+    render_sidebar()
+    pages = [
+        st.Page(render_investigate_page, title="Investigate", icon="🔎", default=True),
+        st.Page(render_history_page, title="Run History", icon="🗂"),
+        st.Page(render_learning_page, title="How It Works", icon="📘"),
+    ]
+    nav = st.navigation(pages, position="sidebar")
+    nav.run()
+
 
 if __name__ == "__main__":
     main()
