@@ -295,6 +295,32 @@ class DailyAnalysisScheduler:
             raise
 
 
+def generate_briefing_now(generate_data: bool = False) -> Dict[str, Any]:
+    """Generate and cache today's briefing on demand, from within the app.
+
+    This lets business users refresh insights with a button instead of running a
+    command-line tool. Data regeneration is off by default so a UI click stays fast.
+
+    Args:
+        generate_data: If True, regenerate synthetic MES data first (slow). Off by
+            default because in the running app the database already exists.
+
+    Returns:
+        The analysis results dict that was cached.
+    """
+    scheduler = DailyAnalysisScheduler(generate_data=generate_data)
+
+    async def _run():
+        if generate_data:
+            scheduler.generate_fresh_data()
+        await scheduler.initialize()
+        results = await scheduler.generate_daily_analysis()
+        scheduler.save_analysis_cache(results)
+        return results
+
+    return asyncio.run(_run())
+
+
 async def main():
     """Main entry point for daily analysis"""
     scheduler = DailyAnalysisScheduler()

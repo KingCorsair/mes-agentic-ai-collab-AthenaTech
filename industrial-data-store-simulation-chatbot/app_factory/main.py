@@ -1,6 +1,9 @@
 """
-Main entry point for the MES Demo Application
-Allows selection between MES Chat and Production Meeting modes
+Main entry point for the Manufacturing Operations Hub.
+
+Business users land directly on the Daily Production Meeting dashboard (answers
+first). A persistent sidebar switch moves between the dashboard and the MES
+Insight Chat, so there is no separate "pick an app" screen to get through.
 """
 
 import streamlit as st
@@ -23,67 +26,50 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-def main():
-    """Main application entry point"""
-    
-    # App selector logic
-    if 'app_mode' not in st.session_state:
-        st.session_state.app_mode = None
-    
-    # Run the selected app or show homepage
-    if st.session_state.app_mode == "mes_chat":
-        run_mes_chat()
-    elif st.session_state.app_mode == "production_meeting":
-        run_production_meeting()
-    else:
-        # Show homepage content only when no app is selected
-        # Application header
-        col1, col2 = st.columns([1, 5])
-        
-        with col1:
-            st.image("https://upload.wikimedia.org/wikipedia/commons/9/93/Amazon_Web_Services_Logo.svg", width=80)
-            
-        with col2:
-            st.title("🏭 Manufacturing Operations Hub")
-        
-        st.markdown("""
-        Welcome to the Manufacturing Operations Hub for your e-bike manufacturing facility.
-        Choose from the following applications:
-        """)
-        
-        # Application selector using native Streamlit components
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("⚙️ MES Insight Chat")
-            st.write("""
-            Interactive chat interface for MES data analysis. Ask questions about production, inventory, 
-            machine status, quality control, and more using natural language.
-            
-            **Use this when:** You need to analyze specific MES data or investigate issues.
-            """)
-            
-            if st.button("Launch MES Chat", key="launch_mes", use_container_width=True):
-                st.session_state.app_mode = "mes_chat"
-                st.rerun()
-        
-        with col2:
-            st.subheader("📊 Daily Production Meeting")
-            st.write("""
-            Structured interface for daily lean meetings with production KPIs, issue tracking, 
-            and performance metrics focused on today's operations.
-            
-            **Use this when:** Running daily stand-up meetings, shift handovers, 
-            or production status reviews.
-            """)
-            
-            if st.button("Launch Production Meeting", key="launch_prod", use_container_width=True):
-                st.session_state.app_mode = "production_meeting"
-                st.rerun()
+# The two workspaces available in the hub.
+DASHBOARD = "production_meeting"
+CHAT = "mes_chat"
 
-        # Footer
+VIEW_LABELS = {
+    DASHBOARD: "Daily Production Meeting",
+    CHAT: "MES Insight Chat",
+}
+
+
+def render_workspace_switch():
+    """Persistent sidebar control for moving between the two workspaces."""
+    with st.sidebar:
+        st.markdown("### 🏭 Operations Hub")
+        st.caption("E-bike Manufacturing Facility")
+
+        choice = st.radio(
+            "Workspace",
+            options=[DASHBOARD, CHAT],
+            format_func=lambda v: VIEW_LABELS[v],
+            key="app_mode",
+            label_visibility="collapsed",
+        )
         st.divider()
-        st.caption("E-bike Manufacturing Facility Demo • MES & Production Meeting Simulator")
+        return choice
+
+
+def main():
+    """Main application entry point."""
+
+    # Land on the dashboard by default so the first screen shows today's answers,
+    # not a menu.
+    if "app_mode" not in st.session_state:
+        st.session_state.app_mode = DASHBOARD
+
+    # Sidebar workspace switch is always available; each workspace appends its own
+    # settings below it.
+    selected = render_workspace_switch()
+
+    if selected == CHAT:
+        run_mes_chat()
+    else:
+        run_production_meeting()
+
 
 if __name__ == "__main__":
     main()

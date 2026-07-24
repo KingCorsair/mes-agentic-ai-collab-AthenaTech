@@ -1,0 +1,15 @@
+[theme]
+# Manufacturing Operations Hub — professional industrial theme
+primaryColor = "#0B6BCB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F1F5F9"
+textColor = "#1E293B"
+font = "sans serif"
+
+[client]
+# Keep the interface clean for business users; hide developer-facing chrome.
+toolbarMode = "minimal"
+showErrorDetails = false
+
+[ui]
+hideTopBar = false

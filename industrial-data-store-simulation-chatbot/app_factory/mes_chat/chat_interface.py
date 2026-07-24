@@ -34,6 +34,10 @@ db_path = os.path.join(proj_dir, 'mes.db')
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Developer/admin controls (model choice, timings, agent internals) are hidden from
+# business users by default. Set MES_SHOW_ADVANCED=1 to reveal them.
+SHOW_ADVANCED = os.getenv("MES_SHOW_ADVANCED", "").strip().lower() in ("1", "true", "yes")
+
 # Initialize database tool for fallback
 db_tool = DatabaseManager(db_path)
 
@@ -47,8 +51,8 @@ def reset_chat():
     """Reset the agent chat state"""
     st.session_state.messages = [
         {
-            "role": "assistant", 
-            "content": "Welcome to MES Insight Chat with AI Agents! I'm your intelligent manufacturing analyst. How can I help you analyze your MES data today?"
+            "role": "assistant",
+            "content": "Hi! I'm your manufacturing analyst. Ask me anything about production, quality, equipment, or inventory — for example, *\"What was our completion rate yesterday?\"*"
         }
     ]
     st.session_state.conversation_history = []
@@ -124,40 +128,35 @@ def display_agent_response(response: Dict[str, Any], message_index: int):
     if analysis_content:
         st.markdown(analysis_content)
     
-    # Display progress updates if available
+    # Display progress updates if available (developer/admin view only)
     progress_updates = response.get('progress_updates', [])
-    if progress_updates:
+    if progress_updates and SHOW_ADVANCED:
         display_progress_updates(progress_updates)
-    
-    # Display execution metadata in smaller format
-    execution_time = response.get('execution_time', 0)
-    analysis_depth = response.get('analysis_depth', 'standard')
-    agent_type = response.get('agent_type', 'MES Analysis Agent')
-    
-    # Create a compact stats display
-    stats_text = f"**Analysis Time:** {execution_time:.2f}s | **Analysis Depth:** {analysis_depth.title()} | **Agent Type:** Strands Agent"
-    st.caption(stats_text)
-    
-    # Display tools used
-    capabilities_used = response.get('capabilities_used', [])
-    if capabilities_used:
-        # Format tool names for better display
-        formatted_tools = []
-        for tool in capabilities_used:
-            if tool == 'mes_analysis_tool':
-                formatted_tools.append('MES Analysis')
-            elif tool == 'run_sqlite_query':
-                formatted_tools.append('SQL Query')
-            elif tool == 'get_database_schema':
-                formatted_tools.append('Schema Analysis')
-            elif tool == 'create_intelligent_visualization':
-                formatted_tools.append('Visualization')
-            else:
-                formatted_tools.append(tool.replace('_', ' ').title())
-        
-        tools_text = " • ".join(formatted_tools)
-        st.caption(f"**Strands Tools Used:** {tools_text}")
-    
+
+    # Execution telemetry (timing, agent type, tools used) is developer-facing and
+    # only shown when the advanced/admin flag is set.
+    if SHOW_ADVANCED:
+        execution_time = response.get('execution_time', 0)
+        analysis_depth = response.get('analysis_depth', 'standard')
+        stats_text = f"**Analysis Time:** {execution_time:.2f}s | **Analysis Depth:** {analysis_depth.title()} | **Agent Type:** Strands Agent"
+        st.caption(stats_text)
+
+        capabilities_used = response.get('capabilities_used', [])
+        if capabilities_used:
+            formatted_tools = []
+            for tool in capabilities_used:
+                if tool == 'mes_analysis_tool':
+                    formatted_tools.append('MES Analysis')
+                elif tool == 'run_sqlite_query':
+                    formatted_tools.append('SQL Query')
+                elif tool == 'get_database_schema':
+                    formatted_tools.append('Schema Analysis')
+                elif tool == 'create_intelligent_visualization':
+                    formatted_tools.append('Visualization')
+                else:
+                    formatted_tools.append(tool.replace('_', ' ').title())
+            st.caption(f"**Tools Used:** {' • '.join(formatted_tools)}")
+
     # Display follow-up suggestions
     follow_ups = response.get('follow_up_suggestions', [])
     if follow_ups:
@@ -266,7 +265,8 @@ def run_mes_chat():
     """Main function to run the agent-enabled MES chat interface"""
     
     # Page configuration
-    st.header("🤖 MES Insight Chat")
+    st.header("MES Insight Chat")
+    st.caption("Ask questions about your factory in plain English and get answers from live MES data.")
     
     # Initialize session state for agent chat
     if "messages" not in st.session_state:
@@ -298,166 +298,116 @@ def run_mes_chat():
     
     # Sidebar configuration
     with st.sidebar:
-        st.subheader("⚙️ Agent Chat Settings")
-        
-        # Reset chat button
-        st.button("🔄 Reset Agent Chat", on_click=reset_chat, use_container_width=True)
-        
-        # Return to main menu button
-        if st.button("🏠 Return to Main Menu", use_container_width=True):
-            st.session_state.app_mode = None
-            st.rerun()
-        
-        st.divider()
-        
-        # Agent configuration
-        st.subheader("🤖 Agent Configuration")
-        
-        # Analysis depth selection
-        analysis_depth = st.selectbox(
-            "Analysis Depth",
-            options=["quick", "standard", "comprehensive"],
-            index=1,
-            help="Choose how deep the agent should analyze your queries",
-            key="analysis_depth"
-        )
-        
-        # Update agent config if changed
-        if agent_manager.config.analysis_depth != analysis_depth:
-            agent_manager.config.analysis_depth = analysis_depth
-            agent_manager.update_config(agent_manager.config)
-        
-        # Model selection using config
-        available_models = agent_manager.config.SUPPORTED_MODELS
-        model_display_names = agent_manager.config.get_model_display_names()
-        
-        current_model_index = 0
-        if agent_manager.config.default_model in available_models:
-            current_model_index = available_models.index(agent_manager.config.default_model)
-        
-        selected_model_index = st.selectbox(
-            "AI Model",
-            range(len(available_models)),
-            index=current_model_index,
-            format_func=lambda x: model_display_names.get(available_models[x], available_models[x]),
-            help="Select the AI model for agent analysis",
-            key="selected_model"
-        )
-        
-        selected_model_id = available_models[selected_model_index]
-        if agent_manager.config.default_model != selected_model_id:
-            agent_manager.config.default_model = selected_model_id
-            agent_manager.update_config(agent_manager.config)
-        
-        st.divider()
-        
-        # Display agent status
-        display_agent_status_sidebar(agent_manager)
-        
-        st.divider()
-        
-        # About section
-        with st.expander("ℹ️ About Agent Chat"):
+        st.subheader("MES Insight Chat")
+
+        # Primary, business-user action: start a fresh conversation.
+        st.button("New conversation", on_click=reset_chat, use_container_width=True)
+
+        # What this assistant can do (plain language, no internals).
+        with st.expander("What can I ask?"):
             st.markdown("""
-            **AI Agent Features:**
-            
-            🧠 **Multi-Step Analysis**: Agents break down complex queries into logical steps
-            
-            📊 **Domain Expertise**: Specialized knowledge in production, quality, equipment, and inventory
-            
-            🔄 **Progress Tracking**: Real-time updates on analysis progress
-            
-            💡 **Intelligent Suggestions**: Proactive follow-up recommendations
-            
-            🎯 **Error Recovery**: Smart error handling and alternative approaches
-            
-            📈 **Visualizations**: AI-selected charts based on data characteristics
-            
-            📅 **Session Management**: Conversations automatically reset daily to ensure current date context
+            Ask about your factory in plain English — for example:
+
+            - *"What was our completion rate yesterday?"*
+            - *"Which products have the highest defect rates?"*
+            - *"What machines need maintenance this week?"*
+            - *"Which materials are below reorder level?"*
+
+            The assistant reads live MES data, does the analysis, and shows
+            charts where they help.
             """)
+
+        # Developer/admin controls: model choice, analysis depth, agent status.
+        # Hidden from business users unless MES_SHOW_ADVANCED is set.
+        if SHOW_ADVANCED:
+            st.divider()
+            with st.expander("⚙️ Advanced (admin)"):
+                analysis_depth = st.selectbox(
+                    "Analysis Depth",
+                    options=["quick", "standard", "comprehensive"],
+                    index=1,
+                    help="Choose how deep the agent should analyze queries",
+                    key="analysis_depth"
+                )
+                if agent_manager.config.analysis_depth != analysis_depth:
+                    agent_manager.config.analysis_depth = analysis_depth
+                    agent_manager.update_config(agent_manager.config)
+
+                available_models = agent_manager.config.SUPPORTED_MODELS
+                model_display_names = agent_manager.config.get_model_display_names()
+                current_model_index = 0
+                if agent_manager.config.default_model in available_models:
+                    current_model_index = available_models.index(agent_manager.config.default_model)
+
+                selected_model_index = st.selectbox(
+                    "AI Model",
+                    range(len(available_models)),
+                    index=current_model_index,
+                    format_func=lambda x: model_display_names.get(available_models[x], available_models[x]),
+                    help="Select the AI model for analysis",
+                    key="selected_model"
+                )
+                selected_model_id = available_models[selected_model_index]
+                if agent_manager.config.default_model != selected_model_id:
+                    agent_manager.config.default_model = selected_model_id
+                    agent_manager.update_config(agent_manager.config)
+
+            display_agent_status_sidebar(agent_manager)
     
+    # Initialize process_query if it doesn't exist
+    if "process_query" not in st.session_state:
+        st.session_state["process_query"] = None
+
     # Main panel with chat interface
     main_col = st.container()
-    
+
     with main_col:
-        # Load example questions
-        try:
-            questions_path = Path(__file__).parent.parent / 'data' / 'sample_questions.json'
-            if not questions_path.exists():
-                questions_path = Path('sample_questions.json')  # Fallback to original location
-                
-            with open(questions_path, 'r', encoding="utf-8") as file:
-                question_data = json.load(file)
-                question_list = list(question_data['general'].values())
-                category_questions = question_data['categories']
-        except Exception as e:
-            st.error(f"Error loading example questions: {e}")
-            question_list = []
-            category_questions = {}
-    
-        # Example questions for agents
-        if category_questions:
-            st.subheader("🎯 Example Questions")
-            st.markdown("*These questions showcase the agentic system multi-step analysis capabilities*")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("##### 🏭 Production Analysis")
-                for q in category_questions.get("🏭 Production", [])[:3]:
-                    if st.button(f"🤖 {q}", key=f"agent_prod_{hash(q)}", use_container_width=True):
-                        st.session_state.messages.append({"role": "user", "content": q})
-                        st.session_state["process_query"] = q
-                        st.rerun()
-                        
-                st.markdown("##### 🔧 Equipment Analysis")
-                for q in category_questions.get("🔧 Machines", [])[:3]:
-                    if st.button(f"🤖 {q}", key=f"agent_mach_{hash(q)}", use_container_width=True):
-                        st.session_state.messages.append({"role": "user", "content": q})
-                        st.session_state["process_query"] = q
-                        st.rerun()
-            
-            with col2:
-                st.markdown("##### 📦 Inventory Analysis")
-                for q in category_questions.get("📦 Inventory", [])[:3]:
-                    if st.button(f"🤖 {q}", key=f"agent_inv_{hash(q)}", use_container_width=True):
-                        st.session_state.messages.append({"role": "user", "content": q})
-                        st.session_state["process_query"] = q
-                        st.rerun()
-                        
-                st.markdown("##### ⚠️ Quality Analysis")
-                for q in category_questions.get("⚠️ Quality", [])[:3]:
-                    if st.button(f"🤖 {q}", key=f"agent_qual_{hash(q)}", use_container_width=True):
-                        st.session_state.messages.append({"role": "user", "content": q})
-                        st.session_state["process_query"] = q
-                        st.rerun()
-                    
-        st.divider()
-        
-        # Chat history container
-        st.subheader("💬 Agent Conversation")
-        
-        # Initialize process_query if it doesn't exist
-        if "process_query" not in st.session_state:
-            st.session_state["process_query"] = None
-        
-        # Display chat history
+        # Conversation is front and center: display the chat history first.
         for i, message in enumerate(st.session_state.messages):
             if message["role"] == "user":
                 with st.chat_message("user"):
                     st.write(message["content"])
             else:
                 with st.chat_message("assistant"):
-                    # Check if this is an agent response
                     if isinstance(message["content"], dict):
                         display_agent_response(message["content"], i)
                     else:
-                        # Simple text message
                         st.markdown(message["content"])
-        
-        # Chat input
-        user_input = st.chat_input("Ask your AI agent about manufacturing data...")
-        
+
+        # Example questions are onboarding scaffolding: show them only while the
+        # conversation is empty (just the welcome message), as a few clickable chips.
+        conversation_empty = len(st.session_state.messages) <= 1
+        if conversation_empty:
+            try:
+                questions_path = Path(__file__).parent.parent / 'data' / 'sample_questions.json'
+                if not questions_path.exists():
+                    questions_path = Path('sample_questions.json')
+                with open(questions_path, 'r', encoding="utf-8") as file:
+                    question_data = json.load(file)
+                    category_questions = question_data['categories']
+            except Exception as e:
+                logger.warning(f"Could not load example questions: {e}")
+                category_questions = {}
+
+            if category_questions:
+                st.caption("Try one of these to get started:")
+                # Flatten a couple of examples per category into one row of chips.
+                starters = []
+                for cat_key in ["🏭 Production", "⚠️ Quality", "🔧 Machines", "📦 Inventory"]:
+                    for q in category_questions.get(cat_key, [])[:1]:
+                        starters.append(q)
+
+                cols = st.columns(2)
+                for idx, q in enumerate(starters):
+                    with cols[idx % 2]:
+                        if st.button(q, key=f"starter_{hash(q)}", use_container_width=True):
+                            st.session_state.messages.append({"role": "user", "content": q})
+                            st.session_state["process_query"] = q
+                            st.rerun()
+
+        # Chat input (Streamlit pins this to the bottom of the page).
+        user_input = st.chat_input("Ask about production, quality, equipment, or inventory…")
+
         if user_input:
             st.session_state.messages.append({"role": "user", "content": user_input})
             st.session_state["process_query"] = user_input
@@ -470,13 +420,13 @@ def run_mes_chat():
         
         # Check if agent is ready
         if not agent_manager.is_ready():
-            st.error("Agent is not ready. Please check the configuration and try again.")
+            st.error("The assistant isn't available right now. Please refresh the page in a moment, or contact your administrator if this continues.")
             return
-        
+
         # Create a placeholder for progress updates
         progress_placeholder = st.empty()
-        
-        with st.spinner("🤖 Agent is analyzing your query..."):
+
+        with st.spinner("Analyzing your question…"):
             try:
                 # Process the query asynchronously
                 response = asyncio.run(process_agent_query(agent_manager, query))
@@ -497,14 +447,13 @@ def run_mes_chat():
                 logger.error(f"Error processing agent query: {e}")
                 error_response = {
                     'success': False,
-                    'error': str(e),
-                    'message': 'Failed to process query with agent',
+                    'error': "Something went wrong while analyzing that question.",
+                    'message': 'Failed to process query',
                     'query': query,
                     'suggested_actions': [
-                        'Check agent configuration',
-                        'Verify database connectivity', 
-                        'Try a simpler query',
-                        'Contact system administrator'
+                        'Try rephrasing your question, or ask a simpler version',
+                        'Ask about a shorter time period',
+                        'If this keeps happening, contact your administrator'
                     ]
                 }
                 
