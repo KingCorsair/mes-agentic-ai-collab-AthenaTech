@@ -752,8 +752,8 @@ def check_analysis_window(defect_type: str, days_back: int):
 def render_defect_selection():
     """Render defect type selection interface in sidebar"""
     
-    st.sidebar.subheader("🎯 Incident Simulation")
-    st.sidebar.info("Pick a defect type to simulate a detected incident. The Run Analysis button starts the agent workflow for it.")
+    st.sidebar.subheader("🎯 Start here — Select a defect")
+    st.sidebar.info("Pick a defect type to analyze. Then press **Run Analysis** to start the AI workflow for it.")
     
     # Load defect types
     with st.sidebar:
@@ -944,10 +944,11 @@ def render_sidebar_configuration():
 def render_main_dashboard():
     """Render the main dashboard interface"""
     
-    st.header("🏭 Intelligent Agentic AI for Autonomous Manufacturing Operation")
-    st.markdown("""
-    **AI-powered defect analysis** using specialized agents working in sequence to monitor, analyze, plan, and verify quality improvements.
-    """)
+    st.header("🏭 Manufacturing Defect Analysis")
+    st.markdown(
+        "Pick a defect type and get an AI-generated root-cause analysis with a "
+        "shareable PDF report — the equivalent of a quality engineer's write-up, in minutes."
+    )
     st.caption(
         "Demo environment: all data comes from a synthetic MES database — "
         "OEE values and thresholds are illustrative, not calibrated to a real plant."
@@ -995,65 +996,63 @@ def render_main_dashboard():
         st.info("🔗 This PDF is being viewed via a shareable URL. You can bookmark or share this link with others.")
         return
     
-    # Agent workflow overview
-    # Same names and icons as the live feed uses, so the map at the top
-    # matches the territory the class watches below.
-    st.subheader("🤖 AI Agent Workflow")
-    st.error("""
-                           **🧠 Supervisor Agent** - Continuous monitoring
-& Feedback
+    # Agent workflow overview. Tucked into a collapsed expander so the
+    # business user's first screen leads with the task (pick a defect, run),
+    # not the internals — but the teaching content stays one click away, with
+    # the same names and icons the live feed uses.
+    with st.expander("How the analysis works — the AI agent workflow", expanded=False):
+        st.markdown(
+            "A **Supervisor Agent** coordinates five specialist agents in sequence. "
+            "Each one queries the MES database and passes its findings to the next:"
+        )
+        col1, col2, col3, col4, col5 = st.columns(5)
 
-        """)
-    col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.markdown("""
+            **📡 Monitor**
 
-    with col1:
-        st.info("""
-        **📡 Monitor Agent**
+            - Captures OEE drops
+            - Fetches context data
+            - Historical patterns
+            - Operator & work-order logs
+            """)
 
-        • Captures OEE drops
-        • Fetches context data
-        • Historical patterns
-        • Operator logs
-        • Work order analysis
-        """)
+        with col2:
+            st.markdown("""
+            **🔬 Analyzer**
 
-    with col2:
-        st.warning("""
-        **🔬 Analyzer Agent**
+            - Root-cause identification
+            - Correlation analysis
+            - Performance reasoning
+            - Certainty ratings
+            """)
 
-        • Root cause identification
-        • Correlation analysis
-        • Performance reasoning
-        • Certainty ratings (HIGH/MEDIUM/LOW)
-        """)
+        with col3:
+            st.markdown("""
+            **📋 Planner**
 
-    with col3:
-        st.success("""
-        **📋 Planner Agent**
+            - Actionable plans
+            - PDF report creation
+            - Implementation roadmap
+            - Success metrics
+            """)
 
-        • Actionable plans
-        • PDF report creation
-        • Implementation roadmap
-        • Success metrics
-        """)
+        with col4:
+            st.markdown("""
+            **✅ Verifier**
 
-    with col4:
-        st.error("""
-        **✅ Verifier Agent**
+            - Finding validation
+            - Quality assurance
+            """)
 
-        • Finding validation
-        • Quality assurance
-        """)
-    with col5:
-        st.info("""
-        **📧 Executor Agent**
+        with col5:
+            st.markdown("""
+            **📧 Executor**
 
+            - Email notification (dry run)
+            - Routes to human review
+            """)
 
-        • Email notification (dry run)
-        • Human review
-
-        """)
-    
     st.divider()
     
     # Get sidebar configuration
@@ -1252,111 +1251,120 @@ def render_analysis_results():
             )
 
 def render_performance_metrics(analysis):
-    """Render performance metrics and charts"""
-    
-    st.subheader("📈 Performance Metrics")
-    
-    # Create sample metrics based on analysis
-    defect_type = analysis.get('defect_type', 'Unknown')
+    """Render real, traceable facts about the run.
+
+    Deliberately shows only numbers we can stand behind (timing, scope,
+    look-back window). Projected reductions, ROI, and confidence scores are
+    NOT invented here — the actual quantified findings come from the agents'
+    SQL analysis and live in the generated PDF report.
+    """
+
+    st.subheader("📈 Run Details")
+
     analysis_scope = analysis.get('analysis_scope', {})
-    
+
     col1, col2 = st.columns(2)
-    
+
     with col1:
-        st.markdown("**🎯 Analysis Performance**")
-        
-        # Analysis timing metrics
+        st.markdown("**How this analysis ran**")
+
         duration = analysis.get('total_duration', 0)
-        st.metric("Total Analysis Time", f"{duration:.2f}s")
-        st.metric("Agent Coordination", "Successful", "✅")
-        st.metric("Data Quality Score", "95%", "+5%")
-        
-        # Scope coverage
+        st.metric("Total Analysis Time", f"{duration:.1f}s")
+
         enabled_count = sum([
             analysis_scope.get('include_oee', False),
             analysis_scope.get('include_downtime', False),
             analysis_scope.get('include_changeover', False),
-            analysis_scope.get('include_maintenance', False)
+            analysis_scope.get('include_maintenance', False),
         ])
-        st.metric("Analysis Coverage", f"{enabled_count}/4 areas", f"+{enabled_count}")
-    
+        st.metric("Analysis Areas Covered", f"{enabled_count} of 4")
+        st.metric("Look-back Window", f"{analysis.get('analysis_period', 7)} days")
+
     with col2:
-        st.markdown("**📊 Impact Projection**")
-        
-        # Projected improvements (sample data)
-        st.metric("Projected Defect Reduction", "15-25%", "+20%")
-        st.metric("Expected OEE Improvement", "3-7%", "+5%")
-        st.metric("ROI Timeline", "2-4 months", "📈")
-        st.metric("Confidence Level", "High", "🎯")
+        st.markdown("**Where the findings are**")
+        st.info(
+            "The root causes, quantified impact, and recommended actions for "
+            "this defect are in the **PDF report** — every number there is "
+            "computed from the MES database by the agents, not estimated here.\n\n"
+            "Open it from the **Executive Summary** tab or the sidebar's "
+            "**Available Reports** list."
+        )
 
 def render_executive_summary(analysis):
-    """Render executive summary of the analysis"""
-    
+    """Executive summary: what was analyzed, and a direct route to the report.
+
+    The validated findings and recommended actions are produced by the agents
+    and written into the PDF (traceable to SQL). This tab summarizes the run's
+    real parameters and puts the report one click away — it does not restate or
+    invent findings the app can't verify here.
+    """
+
     defect_type = analysis.get('defect_type', 'Unknown')
     analysis_scope = analysis.get('analysis_scope', {})
-    
+
     st.subheader("📋 Executive Summary")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Parse end_time safely
-        end_time_str = analysis.get('end_time', '')
-        if end_time_str:
-            try:
-                end_time = datetime.fromisoformat(end_time_str)
-                end_time_formatted = end_time.strftime('%Y-%m-%d %H:%M')
-            except:
-                end_time_formatted = end_time_str
-        else:
-            end_time_formatted = datetime.now().strftime('%Y-%m-%d %H:%M')
-        
-        scope_summary = analysis_scope.get('scope_summary', 'Basic Analysis')
-        
-        st.markdown(f"""
-        **🎯 Analysis Target:**
-        - Defect Type: {defect_type}
-        - Analysis Period: {analysis.get('analysis_period', 7)} days
-        - Analysis Scope: {scope_summary}
-        - Completed: {end_time_formatted}
-        
-        **🔍 Key Findings:**
-        - Supervisor agent coordinated complete workflow
-        - All specialized agents executed successfully within scope
-        - Comprehensive analysis completed with actionable insights
-        - Workflow orchestration ensured proper data flow and scope adherence
-        """)
-    
-    with col2:
-        enabled_areas = []
-        if analysis_scope.get('include_oee'):
-            enabled_areas.append("OEE performance optimization")
-        if analysis_scope.get('include_downtime'):
-            enabled_areas.append("downtime reduction strategies")
-        if analysis_scope.get('include_changeover'):
-            enabled_areas.append("changeover time improvements")
-        if analysis_scope.get('include_maintenance'):
-            enabled_areas.append("maintenance schedule optimization")
-        
-        areas_text = ", ".join(enabled_areas) if enabled_areas else "basic operational improvements"
-        
-        st.markdown(f"""
-        **⚡ Immediate Actions Required:**
-        1. Review supervisor agent findings and recommendations
-        2. Implement coordinated action plans focusing on {areas_text}
-        3. Schedule validation meetings with stakeholders
-        4. Monitor defect trends using integrated insights
-        
-        **📈 Success Metrics:**
-        - Integrated defect reduction strategy established
-        - Scope-specific performance monitoring KPIs defined
-        - Coordinated implementation timeline created
-        - Comprehensive resource allocation planned for enabled areas
-        """)
-    
-    # Risk assessment
-    st.markdown("**⚠️ Risk Assessment:**")
-    st.info(f"Comprehensive supervisor-coordinated analysis completed for {defect_type} within the specified scope ({scope_summary}). The integrated workflow has provided validated insights from all specialized agents for effective defect reduction.")
+
+    # Parse end_time safely
+    end_time_str = analysis.get('end_time', '')
+    if end_time_str:
+        try:
+            end_time_formatted = datetime.fromisoformat(end_time_str).strftime('%Y-%m-%d %H:%M')
+        except (ValueError, TypeError):
+            end_time_formatted = end_time_str
+    else:
+        end_time_formatted = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    scope_summary = analysis_scope.get('scope_summary', 'Basic Analysis')
+
+    enabled_areas = []
+    if analysis_scope.get('include_oee'):
+        enabled_areas.append("OEE performance")
+    if analysis_scope.get('include_downtime'):
+        enabled_areas.append("downtime & stoppages")
+    if analysis_scope.get('include_changeover'):
+        enabled_areas.append("batch changeover")
+    if analysis_scope.get('include_maintenance'):
+        enabled_areas.append("maintenance correlation")
+    areas_text = ", ".join(enabled_areas) if enabled_areas else "basic operational review"
+
+    st.markdown(f"""
+    **What was analyzed**
+    - **Defect type:** {defect_type}
+    - **Look-back period:** {analysis.get('analysis_period', 7)} days
+    - **Focus areas:** {areas_text}
+    - **Completed:** {end_time_formatted}
+    """)
+
+    st.markdown("**Your report**")
+    pdf_filename = analysis.get("pdf_filename")
+    pdf_path = REPORTS_DIR / pdf_filename if pdf_filename else None
+    if pdf_path and pdf_path.exists():
+        st.markdown(
+            "The full root-cause analysis and recommended actions for "
+            f"**{defect_type}** are in the generated report. Every figure in it "
+            "is computed from the MES database by the agents."
+        )
+        with open(pdf_path, "rb") as pdf_file:
+            pdf_bytes = pdf_file.read()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                "📥 Download report (PDF)",
+                data=pdf_bytes,
+                file_name=pdf_filename,
+                mime="application/pdf",
+                use_container_width=True,
+                key="exec_download_pdf",
+            )
+        with col2:
+            if st.button("👁️ View report", use_container_width=True, key="exec_view_pdf"):
+                st.query_params["pdf"] = pdf_filename
+                st.rerun()
+    else:
+        st.info(
+            "The report file could not be found. Re-run the analysis to "
+            "regenerate it."
+        )
 
 def main():
     """Main function to run the MES dashboard"""

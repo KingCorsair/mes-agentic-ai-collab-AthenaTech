@@ -1,0 +1,12 @@
+[theme]
+# Professional industrial theme for the manufacturing defect-analysis app.
+primaryColor = "#0B6BCB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F1F5F9"
+textColor = "#1E293B"
+font = "sans serif"
+
+[client]
+# Keep developer chrome out of the business user's way.
+toolbarMode = "minimal"
+showErrorDetails = false
