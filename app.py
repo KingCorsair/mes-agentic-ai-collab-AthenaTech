@@ -869,6 +869,148 @@ def render_defect_selection():
         
     return selected_defect
 
+@st.cache_data(ttl=300)
+def get_defect_overview(days_back: int = 30):
+    """Real, read-only overview data for the landing dashboard.
+
+    Three parameterized SELECTs against the read-only MES database, anchored to
+    the newest record (not today), following the repo's query house style. All
+    figures shown on the overview trace back to these queries — nothing is
+    estimated. Returns a dict of DataFrames plus headline totals, or None.
+    """
+    agent_manager = get_agent_manager()
+    if agent_manager is None:
+        return None
+    try:
+        anchor = agent_manager.data_anchor_date
+        anchor_str = anchor.strftime('%Y-%m-%d')
+        cutoff_str = agent_manager._cutoff_date(days_back)
+        window = (cutoff_str, anchor_str)
+
+        by_type = agent_manager._execute_safe_query(
+            """SELECT d.DefectType AS DefectType, COUNT(*) AS Occurrences
+               FROM Defects d JOIN QualityControl qc ON d.CheckID = qc.CheckID
+               WHERE date(qc.Date) >= ? AND date(qc.Date) <= ?
+               GROUP BY d.DefectType ORDER BY Occurrences DESC LIMIT 10""",
+            window, purpose="Top defect types in the overview window")
+
+        by_severity = agent_manager._execute_safe_query(
+            """SELECT d.Severity AS Severity, COUNT(*) AS Occurrences
+               FROM Defects d JOIN QualityControl qc ON d.CheckID = qc.CheckID
+               WHERE date(qc.Date) >= ? AND date(qc.Date) <= ?
+               GROUP BY d.Severity ORDER BY d.Severity""",
+            window, purpose="Defect severity distribution in the overview window")
+
+        by_day = agent_manager._execute_safe_query(
+            """SELECT date(qc.Date) AS Day, COUNT(*) AS Occurrences
+               FROM Defects d JOIN QualityControl qc ON d.CheckID = qc.CheckID
+               WHERE date(qc.Date) >= ? AND date(qc.Date) <= ?
+               GROUP BY Day ORDER BY Day""",
+            window, purpose="Defects per day in the overview window")
+
+        if not (by_type.get("success") and by_day.get("success")):
+            return None
+
+        type_df = by_type["dataframe"]
+        sev_df = by_severity["dataframe"] if by_severity.get("success") else pd.DataFrame()
+        day_df = by_day["dataframe"]
+
+        total = int(type_df["Occurrences"].sum()) if not type_df.empty else 0
+        # Weighted mean severity across the distribution.
+        avg_sev = 0.0
+        if not sev_df.empty and sev_df["Occurrences"].sum() > 0:
+            avg_sev = float((sev_df["Severity"] * sev_df["Occurrences"]).sum() / sev_df["Occurrences"].sum())
+
+        return {
+            "anchor": anchor_str,
+            "cutoff": cutoff_str,
+            "days_back": days_back,
+            "by_type": type_df,
+            "by_severity": sev_df,
+            "by_day": day_df,
+            "total_defects": total,
+            "distinct_types": int(type_df.shape[0]),
+            "avg_severity": avg_sev,
+            "top_type": type_df.iloc[0]["DefectType"] if not type_df.empty else "—",
+        }
+    except Exception as e:
+        logger.warning(f"Defect overview query failed: {e}")
+        return None
+
+
+def render_overview_dashboard():
+    """Charts-first operational overview, shown at the top of the landing page.
+
+    Mirrors the useful shape of an ops dashboard: headline KPIs, then defect
+    mix and severity side by side, then a trend line — all from live MES data.
+    """
+    overview = get_defect_overview(30)
+    if not overview or overview["total_defects"] == 0:
+        return
+
+    st.subheader("📊 Quality Overview")
+    st.caption(
+        f"Last {overview['days_back']} days of data "
+        f"({overview['cutoff']} → {overview['anchor']}, ending at the newest "
+        f"record in the database)."
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Defects Recorded", f"{overview['total_defects']:,}")
+    k2.metric("Defect Types", f"{overview['distinct_types']}")
+    sev = overview["avg_severity"]
+    sev_word = "High" if sev > 3 else "Medium" if sev > 2 else "Low"
+    k3.metric("Avg Severity", f"{sev:.1f}/5 ({sev_word})")
+    k4.metric("Most Frequent", overview["top_type"])
+
+    left, right = st.columns([3, 2])
+
+    with left:
+        st.markdown("**Top defect types**")
+        type_df = overview["by_type"].sort_values("Occurrences")
+        fig = px.bar(
+            type_df, x="Occurrences", y="DefectType", orientation="h",
+            color_discrete_sequence=["#0B6BCB"],
+        )
+        fig.update_layout(
+            template="plotly_white", height=340,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_title=None, yaxis_title=None,
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    with right:
+        st.markdown("**Severity distribution**")
+        sev_df = overview["by_severity"].copy()
+        if not sev_df.empty:
+            sev_df["Label"] = sev_df["Severity"].map(lambda s: f"Sev {int(s)}")
+            fig = px.bar(
+                sev_df, x="Label", y="Occurrences",
+                color="Severity", color_continuous_scale="Blues",
+            )
+            fig.update_layout(
+                template="plotly_white", height=340,
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title=None, yaxis_title=None, coloraxis_showscale=False,
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.caption("No severity data in this window.")
+
+    st.markdown("**Defects per day**")
+    day_df = overview["by_day"]
+    fig = px.area(day_df, x="Day", y="Occurrences", color_discrete_sequence=["#0B6BCB"])
+    fig.update_traces(line_color="#0B6BCB", fillcolor="rgba(11,107,203,0.12)")
+    fig.update_layout(
+        template="plotly_white", height=260,
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis_title=None, yaxis_title=None,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    st.divider()
+
+
 def render_defect_preview(defect_type: str):
     """Render detailed preview information for selected defect type in main area"""
     
@@ -1154,6 +1296,10 @@ def render_main_dashboard():
             )
         return
     
+    # Charts-first operational overview (real MES data), shown above the
+    # defect workspace so the page opens with the situational picture.
+    render_overview_dashboard()
+
     # Main content area
     if selected_defect:
         # Show detailed defect preview in main area
